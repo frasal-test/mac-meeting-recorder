@@ -13,7 +13,7 @@ fi
 
 mkdir -p "$AUDIO_DIR"
 
-exec "$SCRIPT_DIR/.venv/bin/python" -m taprecord_whisper.cli \
+exec "$SCRIPT_DIR/.venv/bin/python" -m meeting_recorder.cli \
   "$AUDIO_DIR" \
   --watch \
   --model "$MODEL" \

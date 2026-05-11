@@ -104,7 +104,7 @@ If you just want to record without the watcher:
 The transcription engine accepts additional flags via the CLI directly:
 
 ```bash
-.venv/bin/python -m taprecord_whisper.cli recordings/ \
+.venv/bin/python -m meeting_recorder.cli recordings/ \
   --watch \
   --model large-v3 \
   --language it \

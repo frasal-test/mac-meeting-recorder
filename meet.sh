@@ -47,7 +47,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
 
 # ── start transcription watcher in background ─────────────────────────────────
 # stable-seconds=3: file is already complete when saved, no need to wait longer
-"$VENV_PYTHON" -m taprecord_whisper.cli \
+"$VENV_PYTHON" -m meeting_recorder.cli \
     "$RECORDINGS_DIR" \
     --watch \
     --model "$MODEL" \
