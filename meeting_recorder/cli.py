@@ -106,7 +106,7 @@ class Transcript:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="taprecord-whisper",
+        prog="mac-meeting-recorder",
         description="Transcribe audio/video files with faster-whisper.",
     )
     parser.add_argument(

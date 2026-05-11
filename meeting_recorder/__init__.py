@@ -1,2 +1,2 @@
-"""TapRecord to faster-whisper transcription helpers."""
+"""Swift Audio recorder to faster-whisper transcription helpers."""
 
