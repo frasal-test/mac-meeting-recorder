@@ -1,125 +1,124 @@
-# TapRecord Whisper
+# mac-meeting-recorder
 
-Small local pipeline for using TapRecord as the recorder and `faster-whisper` as the transcription engine.
+Record and transcribe Zoom/Teams meetings on macOS — locally, no cloud, no subscriptions.
 
-TapRecord handles the macOS/Zoom capture permissions. This tool watches the recordings folder, waits until a file stops changing, then writes:
+Captures **system audio** (remote participants) and **microphone** (you) simultaneously, mixes them, and transcribes everything with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Optional speaker diarization via [pyannote.audio](https://github.com/pyannote/pyannote-audio).
 
-- `.txt` plain transcript
-- `.srt` captions
-- `.json` structured segments and optional word timestamps
-- optional `.speakers.txt` and `.rttm` speaker diarization output
+## How it works
+
+- **Recording** — a Swift CLI uses [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) for system audio and `AVAudioEngine` for the microphone. The two streams are mixed into a single `.m4a` via `AVFoundation`. No virtual audio drivers, no device switching.
+- **Transcription** — a Python watcher picks up new files and runs `faster-whisper` on them, producing `.txt`, `.srt`, and `.json` outputs.
+- **Diarization** — optional speaker labels (`SPEAKER_00`, `SPEAKER_01`, …) via pyannote, written to `.speakers.txt` and `.rttm`.
+
+## Requirements
+
+- macOS 13 or later
+- Xcode Command Line Tools (`xcode-select --install`)
+- Python 3.9+
+- [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`) — used by PyAV for audio decoding
 
 ## Setup
 
 ```bash
+git clone https://github.com/frasal-test/mac-meeting-recorder.git
+cd mac-meeting-recorder
+
 python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
-For speaker labels:
+For speaker diarization:
 
 ```bash
-pip install -r requirements-diarization.txt
+.venv/bin/pip install -r requirements-diarization.txt
 ```
 
-Add your Hugging Face read token to `.env`:
+Add your [Hugging Face](https://huggingface.co) read token to `.env` (required for pyannote gated models):
 
 ```bash
-HF_TOKEN=hf_...
+echo "HF_TOKEN=hf_..." > .env
 ```
 
-## Transcribe One Recording
+You also need to accept the model conditions on Hugging Face for:
+- [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+- [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+
+### Permissions (one-time)
+
+Grant **Terminal** access in **System Settings → Privacy & Security**:
+- **Screen & System Audio Recording** — for remote participants' audio
+- **Microphone** — for your own voice
+
+## Usage
 
 ```bash
-python -m taprecord_whisper.cli "/path/to/TapRecord Recording.m4a"
+./meet.sh        # Italian (default)
+./meet.sh en     # English
 ```
 
-## Watch TapRecord Folder
+That's it. One terminal, one command.
 
-```bash
-python -m taprecord_whisper.cli "$HOME/Music/TapRecord" --watch
+```
+  Lingua: it | Modello: medium
+  ● Registrazione in corso — premi Invio per fermare
+
+  [Invio]
+
+  ⏳ Trascrizione in corso...
+
+  ✓ Fatto!
+
+  Testo:     recordings/transcripts/2025-05-11T15-30-00.txt
+  Parlanti:  recordings/transcripts/2025-05-11T15-30-00.speakers.txt
+  Sottotit.: recordings/transcripts/2025-05-11T15-30-00.srt
 ```
 
-By default, folder mode writes outputs to a `transcripts` folder inside the input folder.
+### Output files
 
-## Meeting Launchers
+| File | Description |
+|------|-------------|
+| `.txt` | Plain transcript |
+| `.srt` | Subtitles with timestamps |
+| `.json` | Structured segments, word timestamps, metadata |
+| `.speakers.txt` | Transcript grouped by speaker |
+| `.rttm` | Raw diarization turns |
 
-For the local TapRecord audio folder at `/Users/francescosalerno/Movies/TapRecord/Audio`,
-use the helper scripts:
+### Override model or recordings folder
 
 ```bash
-./meeting-it.sh
-./meeting-en.sh
+WHISPER_MODEL=large-v3 ./meet.sh
+RECORDINGS_DIR=/path/to/folder ./meet.sh en
 ```
 
-Both scripts watch the TapRecord `Audio` folder, enable diarization, and let pyannote
-infer the number of speakers. The Italian launcher uses `--model medium --language it`.
-The English launcher uses `--model medium.en --language en`.
+## Standalone recording
 
-You can override the folder or model when needed:
+If you just want to record without the watcher:
 
 ```bash
-TAPRECORD_AUDIO_DIR="/other/audio/folder" ./meeting-it.sh
-WHISPER_MODEL=large-v3 ./meeting-en.sh
+./record.sh
+# Ctrl+C to stop
 ```
 
-## Useful Options
+## Advanced options
+
+The transcription engine accepts additional flags via the CLI directly:
 
 ```bash
-python -m taprecord_whisper.cli "$HOME/Music/TapRecord" \
+.venv/bin/python -m taprecord_whisper.cli recordings/ \
   --watch \
-  --model small.en \
-  --language en \
+  --model large-v3 \
+  --language it \
+  --diarize \
   --word-timestamps
 ```
 
-For multilingual meetings, use a multilingual model such as `small`, `medium`, or `large-v3` instead of `.en`.
+On Apple Silicon, `--compute-type int8` (default) is the fastest option.
+With a CUDA GPU: `--device cuda --compute-type float16`.
 
-On Apple Silicon, CPU with `--compute-type int8` is usually the easiest first run. If you have a CUDA GPU elsewhere, use `--device cuda --compute-type float16`.
+## Legal note
 
-## Speaker Labels
+Recording meetings may require consent depending on your jurisdiction and company policy. Make sure all participants are aware the call is being recorded.
 
-Speaker diarization separates the audio into labels such as `SPEAKER_00`, `SPEAKER_01`, and attaches the best-matching label to each transcript segment. It does not know real names unless you rename them afterward.
+## License
 
-The default diarization model is `pyannote/speaker-diarization-3.1`. It requires:
-
-- accepting the Hugging Face user conditions for `pyannote/segmentation-3.0`
-- accepting the Hugging Face user conditions for `pyannote/speaker-diarization-3.1`
-- accepting the Hugging Face user conditions for `pyannote/speaker-diarization-community-1` when using newer `pyannote.audio` versions
-- a Hugging Face read token in `.env` for the same account that accepted the model conditions
-
-Run with diarization:
-
-```bash
-HF_TOKEN="hf_..." python -m taprecord_whisper.cli "/path/to/TapRecord Recording.m4a" \
-  --diarize \
-  --num-speakers 2
-```
-
-Or watch a folder:
-
-```bash
-HF_TOKEN="hf_..." python -m taprecord_whisper.cli "$HOME/Music/TapRecord" \
-  --watch \
-  --diarize \
-  --min-speakers 2 \
-  --max-speakers 6
-```
-
-Speaker output files:
-
-- `.speakers.txt`: readable transcript grouped by speaker
-- `.rttm`: raw diarization turns
-- `.json`: transcript segments include a `speaker` field and a `diarization` list
-
-For diarization, the app converts each source recording to a temporary mono 16 kHz
-WAV before calling pyannote. This avoids sample-count issues that can happen when
-pyannote reads compressed files such as `.m4a` directly.
-
-## Notes
-
-- The watcher only processes files with common audio/video extensions.
-- `--stable-seconds` prevents transcription from starting while TapRecord is still writing.
-- `--force` re-runs transcription even when outputs already exist.
-- Recording meetings may require consent depending on your jurisdiction and company policy.
+MIT
