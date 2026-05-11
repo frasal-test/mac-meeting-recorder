@@ -1,0 +1,248 @@
+import AVFoundation
+import Foundation
+import ScreenCaptureKit
+
+// MARK: - Recorder
+
+@available(macOS 13.0, *)
+final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
+    private let finalURL: URL
+    private let systemTmpURL: URL
+    private let micTmpURL: URL
+
+    // System audio (ScreenCaptureKit)
+    private var stream: SCStream?
+    private var systemWriter: AVAssetWriter?
+    private var systemInput: AVAssetWriterInput?
+    private var systemSessionStarted = false
+
+    // Microphone (AVAudioEngine)
+    private var audioEngine: AVAudioEngine?
+    private var micFile: AVAudioFile?
+
+    private var stopping = false
+
+    init(url: URL) {
+        self.finalURL = url
+        let base = url.deletingLastPathComponent()
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent)
+        self.systemTmpURL = URL(fileURLWithPath: base.path + "_sys.m4a")
+        self.micTmpURL    = URL(fileURLWithPath: base.path + "_mic.caf")
+        super.init()
+    }
+
+    // MARK: - Start
+
+    func start() async throws {
+        try await startSystemCapture()
+        do {
+            try startMicCapture()
+        } catch {
+            fputs("Warning: microphone unavailable — recording system audio only. (\(error.localizedDescription))\n", stderr)
+        }
+    }
+
+    private func startSystemCapture() async throws {
+        let content = try await SCShareableContent.current
+        guard let display = content.displays.first else {
+            throw RecorderError.noDisplay
+        }
+
+        systemWriter = try AVAssetWriter(outputURL: systemTmpURL, fileType: .m4a)
+        systemInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 192_000,
+        ])
+        systemInput!.expectsMediaDataInRealTime = true
+        systemWriter!.add(systemInput!)
+        systemWriter!.startWriting()
+
+        let cfg = SCStreamConfiguration()
+        cfg.capturesAudio = true
+        cfg.width = 2
+        cfg.height = 2
+        cfg.minimumFrameInterval = CMTime(seconds: 1, preferredTimescale: 1)
+
+        let filter = SCContentFilter(
+            display: display, excludingApplications: [], exceptingWindows: [])
+        stream = SCStream(filter: filter, configuration: cfg, delegate: self)
+        try stream!.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global())
+        try await stream!.startCapture()
+    }
+
+    private func startMicCapture() throws {
+        audioEngine = AVAudioEngine()
+        let inputNode = audioEngine!.inputNode
+        let format = inputNode.inputFormat(forBus: 0)
+
+        micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self, !self.stopping else { return }
+            try? self.micFile?.write(from: buffer)
+        }
+
+        try audioEngine!.start()
+    }
+
+    // MARK: - Stop
+
+    func stop() async {
+        guard !stopping else { return }
+        stopping = true
+
+        // Stop microphone
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        micFile = nil  // flushes and closes the file
+
+        // Stop system audio
+        try? await stream?.stopCapture()
+        systemInput?.markAsFinished()
+        await withCheckedContinuation { cont in
+            systemWriter?.finishWriting { cont.resume() }
+        }
+
+        // Merge and write final file
+        do {
+            try await mergeAudio()
+        } catch {
+            fputs("Merge error: \(error.localizedDescription)\n", stderr)
+        }
+
+        try? FileManager.default.removeItem(at: systemTmpURL)
+        try? FileManager.default.removeItem(at: micTmpURL)
+    }
+
+    // MARK: - Merge
+
+    private func mergeAudio() async throws {
+        let composition = AVMutableComposition()
+
+        func addTrack(from url: URL) async throws {
+            let asset = AVURLAsset(url: url)
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let track = tracks.first else { return }
+            let duration = try await asset.load(.duration)
+            let compTrack = composition.addMutableTrack(
+                withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            try compTrack?.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
+        }
+
+        let systemExists = FileManager.default.fileExists(atPath: systemTmpURL.path)
+        let micExists    = FileManager.default.fileExists(atPath: micTmpURL.path)
+
+        if systemExists { try await addTrack(from: systemTmpURL) }
+        if micExists    { try await addTrack(from: micTmpURL) }
+
+        guard !composition.tracks.isEmpty else {
+            throw RecorderError.noAudioCaptured
+        }
+
+        // AVAssetExportSession automatically mixes multiple audio tracks
+        guard let export = AVAssetExportSession(
+            asset: composition, presetName: AVAssetExportPresetAppleM4A)
+        else { throw RecorderError.exportFailed }
+
+        try await export.export(to: finalURL, as: .m4a)
+    }
+
+    // MARK: - SCStreamOutput
+
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer buf: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        guard type == .audio, !stopping,
+              let input = systemInput, input.isReadyForMoreMediaData
+        else { return }
+
+        if !systemSessionStarted {
+            systemWriter?.startSession(atSourceTime: buf.presentationTimeStamp)
+            systemSessionStarted = true
+        }
+        input.append(buf)
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        fputs("Stream error: \(error.localizedDescription)\n", stderr)
+    }
+}
+
+// MARK: - Errors
+
+enum RecorderError: Error, LocalizedError {
+    case noDisplay
+    case noAudioCaptured
+    case exportFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noDisplay:       return "No display found"
+        case .noAudioCaptured: return "No audio was captured"
+        case .exportFailed:    return "Could not create export session"
+        }
+    }
+}
+
+// MARK: - Entry point
+
+guard #available(macOS 13.0, *) else {
+    fputs("macOS 13.0 or later is required\n", stderr)
+    exit(1)
+}
+
+guard CommandLine.arguments.count >= 2 else {
+    fputs("Usage: recorder <output.m4a>\n", stderr)
+    exit(1)
+}
+
+let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
+let recorder  = Recorder(url: outputURL)
+
+func stopAndSave() {
+    Task { @MainActor in
+        await recorder.stop()
+        exit(0)
+    }
+}
+
+// Stop on Enter (used by meet.sh)
+let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
+stdinSource.setEventHandler {
+    stdinSource.cancel()
+    stopAndSave()
+}
+stdinSource.resume()
+
+// Stop on Ctrl+C or SIGTERM (used standalone)
+for sig in [SIGINT, SIGTERM] {
+    signal(sig, SIG_IGN)
+    let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    src.setEventHandler {
+        src.cancel()
+        stopAndSave()
+    }
+    src.resume()
+}
+
+Task { @MainActor in
+    do {
+        try await recorder.start()
+        fflush(stdout)
+    } catch {
+        fputs("Failed to start: \(error.localizedDescription)\n", stderr)
+        let msg = error.localizedDescription.lowercased()
+        if msg.contains("not authorized") || msg.contains("permission") || msg.contains("access") {
+            fputs("\nGrant Screen Recording permission to Terminal in:\n", stderr)
+            fputs("System Settings → Privacy & Security → Screen & System Audio Recording\n", stderr)
+        }
+        exit(1)
+    }
+}
+
+dispatchMain()
