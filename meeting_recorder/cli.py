@@ -534,7 +534,10 @@ def transcribe_file(
     )
 
     segments: list[TranscriptSegment] = []
+    duration: float = getattr(info, "duration", None) or 0.0
     for segment in segments_iter:
+        pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
+        print(f"  [{pct}] {segment.text.strip()}", flush=True)
         words: list[Word] | None = None
         if args.word_timestamps and segment.words:
             words = [
