@@ -693,10 +693,19 @@ def load_diarizer(args: argparse.Namespace) -> object | None:
             raise SystemExit(2)
         raise
 
-    if args.diarization_device:
-        import torch
+    import torch
 
-        pipeline.to(torch.device(args.diarization_device))
+    if args.diarization_device != "cpu":
+        device = args.diarization_device
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    print(f"Diarization device: {device}", flush=True)
+    pipeline.to(torch.device(device))
     return pipeline
 
 
