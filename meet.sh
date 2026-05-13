@@ -2,14 +2,17 @@
 # Single entry point for recording + transcribing a meeting.
 #
 # Usage:
-#   ./meet.sh        # Italian (default)
-#   ./meet.sh en     # English
+#   ./meet.sh                # Italian, with diarization (default)
+#   ./meet.sh en             # English, with diarization
+#   ./meet.sh es nodiar      # Spanish, transcript only (no HF token needed)
+#   ./meet.sh auto nodiar    # Auto-detect language, no diarization
 #
 # Press Enter to stop recording.
 # The transcript appears automatically in recordings/transcripts/.
 set -euo pipefail
 
 MEETING_LANG="${1:-it}"
+DIARIZE="${2:-diar}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SCRIPT_DIR/recorder.swift"
 BIN="$SCRIPT_DIR/.recorder"
@@ -25,8 +28,18 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
 fi
 
 if [[ "$MEETING_LANG" != "it" && "$MEETING_LANG" != "en" && "$MEETING_LANG" != "es" && "$MEETING_LANG" != "auto" ]]; then
-    echo "Usage: $0 [it|en|es|auto]" >&2
+    echo "Usage: $0 [it|en|es|auto] [diar|nodiar]" >&2
     exit 1
+fi
+
+if [[ "$DIARIZE" != "diar" && "$DIARIZE" != "nodiar" ]]; then
+    echo "Usage: $0 [it|en|es|auto] [diar|nodiar]" >&2
+    exit 1
+fi
+
+DIARIZE_FLAG=""
+if [[ "$DIARIZE" == "diar" ]]; then
+    DIARIZE_FLAG="--diarize"
 fi
 
 # ── compile recorder if needed ────────────────────────────────────────────────
@@ -57,7 +70,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     --watch \
     --model "$MODEL" \
     $MEETING_LANGUAGE_FLAG \
-    --diarize \
+    $DIARIZE_FLAG \
     --stable-seconds 3 \
     >/dev/null 2>&1 &
 WATCHER_PID=$!
@@ -71,7 +84,7 @@ OUTPUT="$RECORDINGS_DIR/$TS.m4a"
 TRANSCRIPT="$TRANSCRIPTS_DIR/${TS}.txt"
 
 echo ""
-echo "  Lingua: $MEETING_LANG | Modello: $MODEL"
+echo "  Lingua: $MEETING_LANG | Modello: $MODEL | Diarizzazione: $DIARIZE"
 echo "  ● Registrazione in corso — premi Invio per fermare"
 echo ""
 
