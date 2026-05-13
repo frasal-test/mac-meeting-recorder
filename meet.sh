@@ -24,8 +24,8 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
     exit 1
 fi
 
-if [[ "$LANG" != "it" && "$LANG" != "en" ]]; then
-    echo "Usage: $0 [it|en]" >&2
+if [[ "$LANG" != "it" && "$LANG" != "en" && "$LANG" != "es" ]]; then
+    echo "Usage: $0 [it|en|es]" >&2
     exit 1
 fi
 
@@ -36,7 +36,7 @@ if [[ ! -f "$BIN" || "$SRC" -nt "$BIN" ]]; then
            -O "$SRC" -o "$BIN"
 fi
 
-# ── pick model ────────────────────────────────────────────────────────────────
+# ── pick model (English gets the .en variant, others need multilingual) ───────
 if [[ "$LANG" == "en" ]]; then
     MODEL="${WHISPER_MODEL:-medium.en}"
 else
