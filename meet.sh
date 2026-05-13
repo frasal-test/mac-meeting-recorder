@@ -59,7 +59,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     $LANGUAGE_FLAG \
     --diarize \
     --stable-seconds 3 \
-    2>/dev/null &
+    >/dev/null 2>&1 &
 WATCHER_PID=$!
 
 cleanup() { kill "$WATCHER_PID" 2>/dev/null || true; }

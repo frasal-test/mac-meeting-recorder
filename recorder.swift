@@ -26,8 +26,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         self.finalURL = url
         let base = url.deletingLastPathComponent()
             .appendingPathComponent(url.deletingPathExtension().lastPathComponent)
-        self.systemTmpURL = URL(fileURLWithPath: base.path + "_sys.m4a")
-        self.micTmpURL    = URL(fileURLWithPath: base.path + "_mic.caf")
+        self.systemTmpURL = URL(fileURLWithPath: base.path + "._sys.m4a")
+        self.micTmpURL    = URL(fileURLWithPath: base.path + "._mic.caf")
         super.init()
     }
 

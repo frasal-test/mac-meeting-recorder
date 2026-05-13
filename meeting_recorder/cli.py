@@ -229,7 +229,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def is_media_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+    return path.is_file() and not path.name.startswith(".") and path.suffix.lower() in AUDIO_EXTENSIONS
 
 
 def output_dir_for(input_path: Path, explicit: Path | None) -> Path:
