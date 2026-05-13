@@ -75,6 +75,13 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startMicCapture() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
+
+        // Echo cancellation: remove remote audio (playing through speakers)
+        // from the microphone signal so it isn't captured twice.
+        if #available(macOS 14.0, *) {
+            try inputNode.setVoiceProcessingEnabled(true)
+        }
+
         let format = inputNode.inputFormat(forBus: 0)
 
         micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
