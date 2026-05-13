@@ -235,9 +235,7 @@ def is_media_file(path: Path) -> bool:
 def output_dir_for(input_path: Path, explicit: Path | None) -> Path:
     if explicit:
         return explicit
-    if input_path.is_dir():
-        return input_path / "transcripts"
-    return input_path.parent
+    return input_path.parent / "transcripts"
 
 
 def transcript_base(output_dir: Path, source: Path) -> Path:
