@@ -9,7 +9,7 @@
 # The transcript appears automatically in recordings/transcripts/.
 set -euo pipefail
 
-LANG="${1:-it}"
+MEETING_LANG="${1:-it}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SCRIPT_DIR/recorder.swift"
 BIN="$SCRIPT_DIR/.recorder"
@@ -24,7 +24,7 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
     exit 1
 fi
 
-if [[ "$LANG" != "it" && "$LANG" != "en" && "$LANG" != "es" && "$LANG" != "auto" ]]; then
+if [[ "$MEETING_LANG" != "it" && "$MEETING_LANG" != "en" && "$MEETING_LANG" != "es" && "$MEETING_LANG" != "auto" ]]; then
     echo "Usage: $0 [it|en|es|auto]" >&2
     exit 1
 fi
@@ -37,15 +37,15 @@ if [[ ! -f "$BIN" || "$SRC" -nt "$BIN" ]]; then
 fi
 
 # ── pick model (English gets the .en variant, others need multilingual) ───────
-if [[ "$LANG" == "en" ]]; then
+if [[ "$MEETING_LANG" == "en" ]]; then
     MODEL="${WHISPER_MODEL:-medium.en}"
 else
     MODEL="${WHISPER_MODEL:-medium}"
 fi
 
-LANGUAGE_FLAG=""
-if [[ "$LANG" != "auto" ]]; then
-    LANGUAGE_FLAG="--language $LANG"
+MEETING_LANGUAGE_FLAG=""
+if [[ "$MEETING_LANG" != "auto" ]]; then
+    MEETING_LANGUAGE_FLAG="--language $MEETING_LANG"
 fi
 
 mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
@@ -56,7 +56,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     "$RECORDINGS_DIR" \
     --watch \
     --model "$MODEL" \
-    $LANGUAGE_FLAG \
+    $MEETING_LANGUAGE_FLAG \
     --diarize \
     --stable-seconds 3 \
     >/dev/null 2>&1 &
@@ -71,7 +71,7 @@ OUTPUT="$RECORDINGS_DIR/$TS.m4a"
 TRANSCRIPT="$TRANSCRIPTS_DIR/${TS}.txt"
 
 echo ""
-echo "  Lingua: $LANG | Modello: $MODEL"
+echo "  Lingua: $MEETING_LANG | Modello: $MODEL"
 echo "  ● Registrazione in corso — premi Invio per fermare"
 echo ""
 
