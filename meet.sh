@@ -24,8 +24,8 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
     exit 1
 fi
 
-if [[ "$LANG" != "it" && "$LANG" != "en" && "$LANG" != "es" ]]; then
-    echo "Usage: $0 [it|en|es]" >&2
+if [[ "$LANG" != "it" && "$LANG" != "en" && "$LANG" != "es" && "$LANG" != "auto" ]]; then
+    echo "Usage: $0 [it|en|es|auto]" >&2
     exit 1
 fi
 
@@ -43,6 +43,11 @@ else
     MODEL="${WHISPER_MODEL:-medium}"
 fi
 
+LANGUAGE_FLAG=""
+if [[ "$LANG" != "auto" ]]; then
+    LANGUAGE_FLAG="--language $LANG"
+fi
+
 mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
 
 # ── start transcription watcher in background ─────────────────────────────────
@@ -51,7 +56,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     "$RECORDINGS_DIR" \
     --watch \
     --model "$MODEL" \
-    --language "$LANG" \
+    $LANGUAGE_FLAG \
     --diarize \
     --stable-seconds 3 \
     2>/dev/null &
