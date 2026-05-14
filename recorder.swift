@@ -20,9 +20,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var audioEngine: AVAudioEngine?
     private var micFile: AVAudioFile?
 
-    // VU meter levels (approximate, display only)
+    // VU meter (microphone only)
     private var micLevel: Float = 0
-    private var systemLevel: Float = 0
     private var vuTimer: DispatchSourceTimer?
 
     private var stopping = false
@@ -108,8 +107,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         vuTimer!.setEventHandler { [weak self] in
             guard let self else { return }
             let mic = vuBar(self.micLevel)
-            let sys = vuBar(self.systemLevel)
-            print("\r  🎤 \(mic)  🔊 \(sys)  ", terminator: "")
+            print("\r  🎤 \(mic)  ", terminator: "")
             fflush(stdout)
         }
         vuTimer!.resume()
@@ -188,10 +186,6 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     ) {
         guard type == .audio, !stopping else { return }
 
-        // Update the VU meter unconditionally — don't let writer state affect it.
-        let level = rms(sampleBuffer: buf)
-        DispatchQueue.main.async { self.systemLevel = level }
-
         guard let input = systemInput, input.isReadyForMoreMediaData else { return }
         if !systemSessionStarted {
             systemWriter?.startSession(atSourceTime: buf.presentationTimeStamp)
@@ -215,28 +209,6 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         return sqrt(sum / Float(n))
     }
 
-    private func rms(sampleBuffer: CMSampleBuffer) -> Float {
-        // Allocate for up to 8 buffers (SCK delivers stereo non-interleaved = 2 buffers)
-        let abl = AudioBufferList.allocate(maximumBuffers: 8)
-        defer { abl.unsafePointer.deallocate() }
-        var block: CMBlockBuffer?
-        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer, bufferListSizeNeededOut: nil,
-            bufferListOut: abl.unsafeMutablePointer,
-            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: 8),
-            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
-            flags: 0, blockBufferOut: &block) == noErr else { return 0 }
-        var sum: Float = 0
-        var count = 0
-        for buffer in abl {
-            guard let data = buffer.mData else { continue }
-            let n = Int(buffer.mDataByteSize) / 4
-            let floats = data.bindMemory(to: Float.self, capacity: n)
-            for i in 0..<n { sum += floats[i] * floats[i] }
-            count += n
-        }
-        return count > 0 ? sqrt(sum / Float(count)) : 0
-    }
 }
 
 // MARK: - VU bar
