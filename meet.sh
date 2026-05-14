@@ -2,10 +2,11 @@
 # Single entry point for recording + transcribing a meeting.
 #
 # Usage:
-#   ./meet.sh                # Italian, with diarization (default)
-#   ./meet.sh en             # English, with diarization
-#   ./meet.sh es nodiar      # Spanish, transcript only (no HF token needed)
-#   ./meet.sh auto nodiar    # Auto-detect language, no diarization
+#   ./meet.sh                    # Italian, diarization, speakers auto-detected
+#   ./meet.sh en                 # English, diarization
+#   ./meet.sh es nodiar          # Spanish, transcript only (no HF token needed)
+#   ./meet.sh auto nodiar        # Auto-detect language, no diarization
+#   ./meet.sh it diar 2          # Italian, diarization, 2 speakers (more accurate)
 #
 # Press Enter to stop recording.
 # The transcript appears automatically in recordings/transcripts/.
@@ -13,6 +14,7 @@ set -euo pipefail
 
 MEETING_LANG="${1:-it}"
 DIARIZE="${2:-diar}"
+NUM_SPEAKERS="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SCRIPT_DIR/recorder.swift"
 BIN="$SCRIPT_DIR/.recorder"
@@ -41,6 +43,11 @@ fi
 DIARIZE_FLAG=""
 if [[ "$DIARIZE" == "diar" ]]; then
     DIARIZE_FLAG="--diarize"
+fi
+
+NUM_SPEAKERS_FLAG=""
+if [[ -n "$NUM_SPEAKERS" && "$DIARIZE" == "diar" ]]; then
+    NUM_SPEAKERS_FLAG="--num-speakers $NUM_SPEAKERS"
 fi
 
 # ── compile recorder if needed ────────────────────────────────────────────────
@@ -72,6 +79,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     --model "$MODEL" \
     $MEETING_LANGUAGE_FLAG \
     $DIARIZE_FLAG \
+    $NUM_SPEAKERS_FLAG \
     --stable-seconds 3 \
     >"$WATCHER_LOG" 2>/dev/null &
 WATCHER_PID=$!
