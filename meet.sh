@@ -100,7 +100,11 @@ TIMEOUT=600  # max 10 minutes
 while [[ ! -f "$TRANSCRIPT" && $ELAPSED -lt $TIMEOUT ]]; do
     sleep 3
     ELAPSED=$((ELAPSED + 3))
+    MINS=$((ELAPSED / 60))
+    SECS=$((ELAPSED % 60))
+    printf "\r  ⏳ Trascrizione in corso... %dm %02ds" $MINS $SECS
 done
+echo ""
 
 echo ""
 if [[ -f "$TRANSCRIPT" ]]; then
