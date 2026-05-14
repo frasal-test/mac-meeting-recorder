@@ -19,6 +19,7 @@ BIN="$SCRIPT_DIR/.recorder"
 RECORDINGS_DIR="${RECORDINGS_DIR:-$SCRIPT_DIR/recordings}"
 TRANSCRIPTS_DIR="$RECORDINGS_DIR/transcripts"
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
+WATCHER_LOG="/tmp/meet_watcher_$$.log"
 
 # ── sanity checks ─────────────────────────────────────────────────────────────
 if [[ ! -x "$VENV_PYTHON" ]]; then
@@ -72,10 +73,10 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     $MEETING_LANGUAGE_FLAG \
     $DIARIZE_FLAG \
     --stable-seconds 3 \
-    >/dev/null 2>&1 &
+    >"$WATCHER_LOG" 2>/dev/null &
 WATCHER_PID=$!
 
-cleanup() { kill "$WATCHER_PID" 2>/dev/null || true; }
+cleanup() { kill "$WATCHER_PID" 2>/dev/null || true; rm -f "$WATCHER_LOG"; }
 trap cleanup EXIT INT TERM
 
 # ── start recording ───────────────────────────────────────────────────────────
@@ -102,7 +103,8 @@ while [[ ! -f "$TRANSCRIPT" && $ELAPSED -lt $TIMEOUT ]]; do
     ELAPSED=$((ELAPSED + 3))
     MINS=$((ELAPSED / 60))
     SECS=$((ELAPSED % 60))
-    printf "\r  ⏳ Trascrizione in corso... %dm %02ds" $MINS $SECS
+    LAST=$(tail -1 "$WATCHER_LOG" 2>/dev/null | sed 's/^[[:space:]]*//' | cut -c1-60)
+    printf "\r  ⏳ %dm %02ds  %s                    " $MINS $SECS "$LAST"
 done
 echo ""
 
