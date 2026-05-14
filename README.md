@@ -1,20 +1,22 @@
 # mac-meeting-recorder
 
-Record and transcribe Zoom/Teams meetings on macOS — locally, no cloud, no subscriptions.
+Record and transcribe Zoom/Teams/Meet meetings on macOS — locally, no cloud, no subscriptions.
 
-Captures **system audio** (remote participants) and **microphone** (you) simultaneously, applies echo cancellation, mixes them, and transcribes everything with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Optional speaker diarization via [pyannote.audio](https://github.com/pyannote/pyannote-audio).
+Captures **system audio** (remote participants) and **microphone** (you) simultaneously, mixes them, and transcribes everything with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Optional speaker diarization via [pyannote.audio](https://github.com/pyannote/pyannote-audio).
 
 **Audio and transcripts never leave your machine.**
 
+> **Best results with headphones.** Without headphones the microphone picks up the laptop speakers, introducing echo in the recording. With headphones the two audio streams are completely isolated and the transcript is clean.
+
 ## How it works
 
-- **Recording** — a Swift CLI uses [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) for system audio (remote participants) and `AVAudioEngine` for the microphone (you). Echo cancellation (AEC) is applied to the microphone so remote audio played through speakers isn't captured twice. The two streams are mixed into a single `.m4a` via `AVFoundation`. No virtual audio drivers, no device switching.
+- **Recording** — a Swift CLI uses [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) for system audio (remote participants) and `AVAudioEngine` for the microphone (you). The two streams are mixed into a single `.m4a` via `AVFoundation`. No virtual audio drivers, no device switching.
 - **Transcription** — a Python watcher picks up new files and runs `faster-whisper` on them, showing live segments and progress. Outputs `.txt`, `.srt`, and `.json`.
 - **Diarization** — optional speaker labels (`SPEAKER_00`, `SPEAKER_01`, …) via pyannote. Automatically uses MPS (Apple Silicon GPU), CUDA, or CPU — whichever is available.
 
 ## Requirements
 
-- macOS 13 or later (macOS 14+ recommended for echo cancellation)
+- macOS 13 or later
 - Xcode Command Line Tools (`xcode-select --install`)
 - Python 3.9+
 - [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`)
@@ -54,36 +56,37 @@ Grant **Terminal** access in **System Settings → Privacy & Security**:
 ## Usage
 
 ```bash
-./meet.sh [language] [diar|nodiar]
+./meet.sh [language] [diar|nodiar] [num_speakers]
 ```
 
 | Argument | Options | Default |
 |----------|---------|---------|
 | language | `it` `en` `es` `auto` | `it` |
 | diarization | `diar` `nodiar` | `diar` |
+| num_speakers | integer | auto-detect |
 
 ### Examples
 
 ```bash
-./meet.sh              # Italian + diarization
+./meet.sh              # Italian + diarization, speakers auto-detected
 ./meet.sh en           # English + diarization
-./meet.sh es           # Spanish + diarization
-./meet.sh auto         # auto-detect language + diarization
 ./meet.sh es nodiar    # Spanish, transcript only (no HF token needed)
-./meet.sh auto nodiar  # auto-detect, no diarization
+./meet.sh auto         # auto-detect language + diarization
+./meet.sh it diar 2    # Italian, diarization, force 2 speakers (more accurate)
 ```
 
 ### What you see
 
 ```
-  Lingua: es | Modello: medium | Diarizzazione: diar
+  Lingua: it | Modello: medium | Diarizzazione: diar
   ● Registrazione in corso — premi Invio per fermare
+
+  🎤 ████░░░░░░░░  🔊 ██████████░░
 
   [Invio]
 
   ⏳ Trascrizione in corso...
-  [4%] Hola a todos, empezamos la llamada.
-  [9%] Como decía ayer...
+  ⏳ 1m 12s  [34%] Allora come dicevo...
 
   ✓ Fatto!
 
@@ -91,6 +94,8 @@ Grant **Terminal** access in **System Settings → Privacy & Security**:
   Parlanti:  recordings/transcripts/2025-05-11T15-30-00.speakers.txt
   Sottotit.: recordings/transcripts/2025-05-11T15-30-00.srt
 ```
+
+Press **Enter** to stop recording. The transcript appears automatically.
 
 ### Output files
 
@@ -114,12 +119,13 @@ Grant **Terminal** access in **System Settings → Privacy & Security**:
 - Device is selected automatically: **MPS** (Apple Silicon) → **CUDA** → **CPU**.
 - On an M3 Pro with MPS, expect ~5 min for a 1-hour call. On CPU alone, expect 20-30 min.
 - Use `nodiar` to skip diarization entirely — no HF account needed, transcription only.
+- If you know the exact number of speakers, pass it as the third argument for better accuracy.
 
 ## Transcribe an existing file
 
 ```bash
 .venv/bin/python -m meeting_recorder.cli recordings/my-meeting.m4a \
-  --model medium --language es --diarize
+  --model medium --language it --diarize
 ```
 
 Add `--force` to re-transcribe a file that already has a transcript.
