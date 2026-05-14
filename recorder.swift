@@ -193,7 +193,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             systemSessionStarted = true
         }
         input.append(buf)
-        systemLevel = rms(sampleBuffer: buf)
+        let level = rms(sampleBuffer: buf)
+        DispatchQueue.main.async { self.systemLevel = level }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
