@@ -105,8 +105,9 @@ echo ""
 echo "  ⏳ Trascrizione in corso..."
 
 ELAPSED=0
-TIMEOUT=600  # max 10 minutes
-while [[ ! -f "$TRANSCRIPT" && $ELAPSED -lt $TIMEOUT ]]; do
+# Wait as long as the watcher process is alive — no arbitrary timeout.
+# Exits early if the transcript appears or the watcher crashes.
+while [[ ! -f "$TRANSCRIPT" ]] && kill -0 "$WATCHER_PID" 2>/dev/null; do
     sleep 3
     ELAPSED=$((ELAPSED + 3))
     MINS=$((ELAPSED / 60))
@@ -125,7 +126,7 @@ if [[ -f "$TRANSCRIPT" ]]; then
     echo "  Sottotit.: ${TRANSCRIPTS_DIR}/${TS}.srt"
     echo ""
 else
-    echo "  ⚠ Timeout — trascrizione ancora in corso o fallita."
+    echo "  ⚠ Il watcher è terminato prima del transcript."
     echo "  Controlla: $TRANSCRIPTS_DIR"
     echo ""
 fi
