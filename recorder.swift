@@ -212,20 +212,26 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func rms(sampleBuffer: CMSampleBuffer) -> Float {
-        var list = AudioBufferList()
+        // Allocate for up to 8 buffers (SCK delivers stereo non-interleaved = 2 buffers)
+        let abl = AudioBufferList.allocate(maximumBuffers: 8)
+        defer { abl.unsafePointer.deallocate() }
         var block: CMBlockBuffer?
         guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer, bufferListSizeNeededOut: nil,
-            bufferListOut: &list, bufferListSize: MemoryLayout<AudioBufferList>.size,
+            bufferListOut: abl.unsafeMutablePointer,
+            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: 8),
             blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
-            flags: 0, blockBufferOut: &block) == noErr,
-              let data = list.mBuffers.mData else { return 0 }
-        let count = Int(list.mBuffers.mDataByteSize) / 4
-        guard count > 0 else { return 0 }
-        let floats = data.bindMemory(to: Float.self, capacity: count)
+            flags: 0, blockBufferOut: &block) == noErr else { return 0 }
         var sum: Float = 0
-        for i in 0..<count { sum += floats[i] * floats[i] }
-        return sqrt(sum / Float(count))
+        var count = 0
+        for buffer in abl {
+            guard let data = buffer.mData else { continue }
+            let n = Int(buffer.mDataByteSize) / 4
+            let floats = data.bindMemory(to: Float.self, capacity: n)
+            for i in 0..<n { sum += floats[i] * floats[i] }
+            count += n
+        }
+        return count > 0 ? sqrt(sum / Float(count)) : 0
     }
 }
 
