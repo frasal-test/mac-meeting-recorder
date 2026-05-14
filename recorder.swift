@@ -145,9 +145,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             fputs("Merge error: \(error.localizedDescription)\n", stderr)
         }
 
-        // Keep ._sys.m4a and ._mic.caf alongside the final file so that the
-        // Python transcriber can apply offline echo cancellation before running
-        // Whisper. Python will delete them after transcription.
+        try? FileManager.default.removeItem(at: systemTmpURL)
+        try? FileManager.default.removeItem(at: micTmpURL)
     }
 
     // MARK: - Merge
