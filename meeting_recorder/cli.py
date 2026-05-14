@@ -426,6 +426,85 @@ def diarization_kwargs(args: argparse.Namespace) -> dict[str, int]:
     return kwargs
 
 
+def apply_echo_cancellation(source: Path) -> Path | None:
+    """
+    Apply offline acoustic echo cancellation using the per-recording temp files
+    produced by recorder.swift: {stem}._sys.m4a (system audio reference) and
+    {stem}._mic.caf (microphone with echo).
+
+    Uses ffmpeg's ANLMS (Normalized LMS) adaptive filter:
+      - ref  = system audio  → the signal the speakers played (the echo source)
+      - mic  = microphone    → local voice + echo of system audio
+      - output = mic − estimated_echo = clean local voice
+
+    The returned file mixes clean mic + system audio so Whisper can hear
+    both the local speaker and remote participants.
+
+    Returns a temporary WAV path on success, or None if the source files are
+    missing or ffmpeg fails (in which case transcription falls back to the
+    original merged file).
+    """
+    import subprocess
+
+    base_str = str(source.parent / source.stem)
+    sys_path = Path(base_str + "._sys.m4a")
+    mic_path = Path(base_str + "._mic.caf")
+
+    if not sys_path.exists() or not mic_path.exists():
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"{source.stem}-aec-", suffix=".wav", delete=False
+    )
+    out_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(sys_path),   # 0: system audio (echo reference)
+                "-i", str(mic_path),   # 1: microphone (near-end with echo)
+                "-filter_complex",
+                # Normalise both tracks to mono 16 kHz
+                "[0:a]aformat=channel_layouts=mono:sample_rates=16000[ref];"
+                "[1:a]aformat=channel_layouts=mono:sample_rates=16000[mic];"
+                # ANLMS: ref = signal to filter, mic = desired output
+                # error output = mic − f(ref) = mic without echo
+                "[ref][mic]anlms=order=4096:mu=0.25:leaky=0.0001[mic_clean];"
+                # Mix clean mic + reference so both sides are audible
+                "[mic_clean][ref]amix=inputs=2:weights=1 1[out]",
+                "-map", "[out]",
+                str(out_path),
+            ],
+            capture_output=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(
+                f"AEC skipped (ffmpeg error {result.returncode}): "
+                + result.stderr.decode(errors="replace").strip().splitlines()[-1],
+                file=sys.stderr,
+                flush=True,
+            )
+            out_path.unlink(missing_ok=True)
+            return None
+
+        return out_path
+
+    except Exception as exc:
+        print(f"AEC skipped ({exc})", file=sys.stderr, flush=True)
+        out_path.unlink(missing_ok=True)
+        return None
+
+
+def cleanup_aec_sources(source: Path) -> None:
+    """Remove the recorder.swift temp files after transcription."""
+    base_str = str(source.parent / source.stem)
+    for suffix in ("._sys.m4a", "._mic.caf"):
+        Path(base_str + suffix).unlink(missing_ok=True)
+
+
 def prepare_diarization_audio(source: Path) -> Path:
     import av
 
@@ -523,69 +602,84 @@ def transcribe_file(
     output_dir.mkdir(parents=True, exist_ok=True)
     base = transcript_base(output_dir, source)
 
-    print(f"Transcribing {source.name}...", flush=True)
-    segments_iter, info = model.transcribe(
-        str(source),
-        beam_size=args.beam_size,
-        language=args.language,
-        task=args.task,
-        vad_filter=not args.no_vad,
-        word_timestamps=args.word_timestamps,
-    )
+    # Apply offline echo cancellation when the per-recording temp files exist.
+    # This removes the room echo from the microphone track so Whisper and
+    # pyannote receive clean audio even without headphones.
+    aec_audio = apply_echo_cancellation(source)
+    if aec_audio:
+        print("  🎙 Echo cancellation applied", flush=True)
+    audio_for_transcription = aec_audio or source
 
-    segments: list[TranscriptSegment] = []
-    duration: float = getattr(info, "duration", None) or 0.0
-    for segment in segments_iter:
-        pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
-        print(f"  [{pct}] {segment.text.strip()}", flush=True)
-        words: list[Word] | None = None
-        if args.word_timestamps and segment.words:
-            words = [
-                Word(
-                    start=word.start,
-                    end=word.end,
-                    word=word.word,
-                    probability=getattr(word, "probability", None),
-                )
-                for word in segment.words
-            ]
-        segments.append(
-            TranscriptSegment(
-                start=segment.start,
-                end=segment.end,
-                text=segment.text,
-                words=words,
-            )
+    try:
+        print(f"Transcribing {source.name}...", flush=True)
+        segments_iter, info = model.transcribe(
+            str(audio_for_transcription),
+            beam_size=args.beam_size,
+            language=args.language,
+            task=args.task,
+            vad_filter=not args.no_vad,
+            word_timestamps=args.word_timestamps,
         )
 
-    diarization_turns = run_diarization(diarizer, source, base, args)
-    if diarization_turns:
-        for segment in segments:
-            segment.speaker = best_speaker_for_segment(segment, diarization_turns)
+        segments: list[TranscriptSegment] = []
+        duration: float = getattr(info, "duration", None) or 0.0
+        for segment in segments_iter:
+            pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
+            print(f"  [{pct}] {segment.text.strip()}", flush=True)
+            words: list[Word] | None = None
+            if args.word_timestamps and segment.words:
+                words = [
+                    Word(
+                        start=word.start,
+                        end=word.end,
+                        word=word.word,
+                        probability=getattr(word, "probability", None),
+                    )
+                    for word in segment.words
+                ]
+            segments.append(
+                TranscriptSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=segment.text,
+                    words=words,
+                )
+            )
 
-    transcript = Transcript(
-        source=str(source),
-        model=args.model,
-        language=getattr(info, "language", None),
-        language_probability=getattr(info, "language_probability", None),
-        duration=getattr(info, "duration", None),
-        segments=segments,
-        diarization=diarization_turns,
-    )
+        diarization_turns = run_diarization(diarizer, audio_for_transcription, base, args)
+        if diarization_turns:
+            for segment in segments:
+                segment.speaker = best_speaker_for_segment(segment, diarization_turns)
 
-    write_txt(base.with_suffix(".txt"), transcript)
-    write_srt(base.with_suffix(".srt"), transcript)
-    write_json(base.with_suffix(".json"), transcript)
-    written = [
-        base.with_suffix(".txt").name,
-        base.with_suffix(".srt").name,
-        base.with_suffix(".json").name,
-    ]
-    if diarization_turns is not None:
-        write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
-        written.append(base.with_suffix(".speakers.txt").name)
-        written.append(base.with_suffix(".rttm").name)
-    print(f"Wrote {', '.join(written)}", flush=True)
+        transcript = Transcript(
+            source=str(source),
+            model=args.model,
+            language=getattr(info, "language", None),
+            language_probability=getattr(info, "language_probability", None),
+            duration=getattr(info, "duration", None),
+            segments=segments,
+            diarization=diarization_turns,
+        )
+
+        write_txt(base.with_suffix(".txt"), transcript)
+        write_srt(base.with_suffix(".srt"), transcript)
+        write_json(base.with_suffix(".json"), transcript)
+        written = [
+            base.with_suffix(".txt").name,
+            base.with_suffix(".srt").name,
+            base.with_suffix(".json").name,
+        ]
+        if diarization_turns is not None:
+            write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
+            written.append(base.with_suffix(".speakers.txt").name)
+            written.append(base.with_suffix(".rttm").name)
+        print(f"Wrote {', '.join(written)}", flush=True)
+
+    finally:
+        # Remove the AEC working file and the recorder.swift temp tracks.
+        if aec_audio:
+            aec_audio.unlink(missing_ok=True)
+        cleanup_aec_sources(source)
 
 
 def load_model(args: argparse.Namespace) -> "WhisperModel":
