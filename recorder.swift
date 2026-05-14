@@ -79,48 +79,63 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func startMicCapture() throws {
+        // Try hardware AEC first (macOS 14+). If VoiceProcessingIO fails it
+        // corrupts the AVAudioEngine's internal AudioUnit state even inside a
+        // catch block, so we must recreate the engine before the plain fallback.
+        if #available(macOS 14.0, *) {
+            do {
+                try startMicCaptureWithVoiceProcessing()
+                return
+            } catch {
+                fputs("Voice processing unavailable, using plain mic (\(error.localizedDescription))\n", stderr)
+                // Engine state may be corrupted — reset before fallback.
+                audioEngine?.stop()
+                audioEngine = nil
+                micFile = nil
+            }
+        }
+        try startMicCapturePlain()
+    }
+
+    @available(macOS 14.0, *)
+    private func startMicCaptureWithVoiceProcessing() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
 
-        // On macOS 14+ enable hardware AEC. We must also disable the automatic
-        // ducking that VoiceProcessingIO applies to all other audio — without
-        // duckingLevel: .min the ScreenCaptureKit stream drops to ~-51 dB and
-        // the system-audio recording goes (nearly) silent.
-        // On macOS 13 we skip voice processing entirely to avoid that side-effect.
-        var voiceProcessingEnabled = false
-        if #available(macOS 14.0, *) {
-            do {
-                try inputNode.setVoiceProcessingEnabled(true)
-                inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
-                        enableAdvancedDucking: false, duckingLevel: .min)
-                voiceProcessingEnabled = true
-            } catch {
-                fputs("Voice processing unavailable (\(error.localizedDescription))\n", stderr)
-            }
-        }
+        try inputNode.setVoiceProcessingEnabled(true)
 
-        // When VoiceProcessingIO is active the input node silently reconfigures
-        // itself to 9 channels; inputFormat(forBus:) returns that wrong layout
-        // and AVAudioFile crashes on write. Pin to mono 44 100 Hz instead.
-        let format: AVAudioFormat
-        if voiceProcessingEnabled {
-            guard let vp = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1) else {
-                throw RecorderError.micFormatUnavailable
-            }
-            format = vp
-        } else {
-            format = inputNode.inputFormat(forBus: 0)
+        // Without duckingLevel: .min VoiceProcessingIO automatically lowers all
+        // other audio to ~-51 dB, which silences the ScreenCaptureKit stream.
+        inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+            AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                enableAdvancedDucking: false, duckingLevel: .min)
+
+        // VoiceProcessingIO silently reconfigures the tap to 9 channels;
+        // inputFormat(forBus:) returns that wrong layout. Use fixed mono 44 100 Hz.
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1) else {
+            throw RecorderError.micFormatUnavailable
         }
 
         micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
-
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             guard let self, !self.stopping else { return }
             try? self.micFile?.write(from: buffer)
             self.micLevel = self.rms(buffer: buffer)
         }
+        try audioEngine!.start()
+    }
 
+    private func startMicCapturePlain() throws {
+        audioEngine = AVAudioEngine()
+        let inputNode = audioEngine!.inputNode
+        let format = inputNode.inputFormat(forBus: 0)
+
+        micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self, !self.stopping else { return }
+            try? self.micFile?.write(from: buffer)
+            self.micLevel = self.rms(buffer: buffer)
+        }
         try audioEngine!.start()
     }
 
