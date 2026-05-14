@@ -81,7 +81,14 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startMicCapture() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
-        let format = inputNode.inputFormat(forBus: 0)
+
+        // Request standard Float32 mono regardless of the hardware format.
+        // AVAudioEngine converts automatically, and floatChannelData is always
+        // non-nil for standard-format buffers so the VU meter always works.
+        let hwRate = inputNode.inputFormat(forBus: 0).sampleRate
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: hwRate, channels: 1) else {
+            throw RecorderError.micFormatUnavailable
+        }
 
         micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
@@ -247,12 +254,14 @@ enum RecorderError: Error, LocalizedError {
     case noDisplay
     case noAudioCaptured
     case exportFailed
+    case micFormatUnavailable
 
     var errorDescription: String? {
         switch self {
-        case .noDisplay:       return "No display found"
-        case .noAudioCaptured: return "No audio was captured"
-        case .exportFailed:    return "Could not create export session"
+        case .noDisplay:            return "No display found"
+        case .noAudioCaptured:      return "No audio was captured"
+        case .exportFailed:         return "Could not create export session"
+        case .micFormatUnavailable: return "Could not create Float32 mic format"
         }
     }
 }
