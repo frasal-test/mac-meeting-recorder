@@ -179,17 +179,18 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer buf: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard type == .audio, !stopping,
-              let input = systemInput, input.isReadyForMoreMediaData
-        else { return }
+        guard type == .audio, !stopping else { return }
 
+        // Update the VU meter unconditionally — don't let writer state affect it.
+        let level = rms(sampleBuffer: buf)
+        DispatchQueue.main.async { self.systemLevel = level }
+
+        guard let input = systemInput, input.isReadyForMoreMediaData else { return }
         if !systemSessionStarted {
             systemWriter?.startSession(atSourceTime: buf.presentationTimeStamp)
             systemSessionStarted = true
         }
         input.append(buf)
-        let level = rms(sampleBuffer: buf)
-        DispatchQueue.main.async { self.systemLevel = level }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
