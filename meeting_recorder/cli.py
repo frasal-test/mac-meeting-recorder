@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+# Speaker label assigned to segments from the local microphone track.
+MIC_SPEAKER_LABEL = "YOU"
+
 AUDIO_EXTENSIONS = {
     ".aac",
     ".aif",
@@ -226,6 +229,12 @@ def parse_args() -> argparse.Namespace:
         help="Device for pyannote diarization.",
     )
     return parser.parse_args()
+
+
+def companion_mic_path(source: Path) -> Path | None:
+    """Return the ._mic.caf companion file left by recorder.swift, if present."""
+    candidate = source.parent / (source.stem + "._mic.caf")
+    return candidate if candidate.exists() else None
 
 
 def is_media_file(path: Path) -> bool:
@@ -513,26 +522,21 @@ def run_diarization(
         diarization_audio.unlink(missing_ok=True)
 
 
-def transcribe_file(
+def collect_segments(
     model: "WhisperModel",
-    diarizer: object | None,
-    source: Path,
-    output_dir: Path,
+    audio_path: Path,
     args: argparse.Namespace,
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    base = transcript_base(output_dir, source)
-
-    print(f"Transcribing {source.name}...", flush=True)
+    speaker: str | None = None,
+) -> tuple[list[TranscriptSegment], object]:
+    """Transcribe one audio file, print live progress, return (segments, info)."""
     segments_iter, info = model.transcribe(
-        str(source),
+        str(audio_path),
         beam_size=args.beam_size,
         language=args.language,
         task=args.task,
         vad_filter=not args.no_vad,
         word_timestamps=args.word_timestamps,
     )
-
     segments: list[TranscriptSegment] = []
     duration: float = getattr(info, "duration", None) or 0.0
     for segment in segments_iter:
@@ -554,38 +558,80 @@ def transcribe_file(
                 start=segment.start,
                 end=segment.end,
                 text=segment.text,
+                speaker=speaker,
                 words=words,
             )
         )
+    return segments, info
 
-    diarization_turns = run_diarization(diarizer, source, base, args)
-    if diarization_turns:
-        for segment in segments:
-            segment.speaker = best_speaker_for_segment(segment, diarization_turns)
 
-    transcript = Transcript(
-        source=str(source),
-        model=args.model,
-        language=getattr(info, "language", None),
-        language_probability=getattr(info, "language_probability", None),
-        duration=getattr(info, "duration", None),
-        segments=segments,
-        diarization=diarization_turns,
-    )
+def transcribe_file(
+    model: "WhisperModel",
+    diarizer: object | None,
+    source: Path,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base = transcript_base(output_dir, source)
+    mic_path = companion_mic_path(source)
 
-    write_txt(base.with_suffix(".txt"), transcript)
-    write_srt(base.with_suffix(".srt"), transcript)
-    write_json(base.with_suffix(".json"), transcript)
-    written = [
-        base.with_suffix(".txt").name,
-        base.with_suffix(".srt").name,
-        base.with_suffix(".json").name,
-    ]
-    if diarization_turns is not None:
-        write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
-        written.append(base.with_suffix(".speakers.txt").name)
-        written.append(base.with_suffix(".rttm").name)
-    print(f"Wrote {', '.join(written)}", flush=True)
+    try:
+        # System audio — remote speakers (clean digital capture via SCK)
+        print(f"Transcribing {source.name}...", flush=True)
+        sys_segments, info = collect_segments(model, source, args)
+
+        # Mic track — local speaker, labelled YOU, kept separate to avoid echo
+        if mic_path:
+            print(f"  Transcribing mic track (local speaker)...", flush=True)
+            mic_segments, _ = collect_segments(
+                model, mic_path, args, speaker=MIC_SPEAKER_LABEL
+            )
+            # Interleave both tracks by start time
+            all_segments = sorted(
+                sys_segments + mic_segments, key=lambda s: s.start
+            )
+        else:
+            all_segments = sys_segments
+
+        # Diarize the system audio to distinguish remote speakers.
+        # Mic segments already carry MIC_SPEAKER_LABEL and are not overwritten.
+        diarization_turns = run_diarization(diarizer, source, base, args)
+        if diarization_turns:
+            for segment in all_segments:
+                if segment.speaker != MIC_SPEAKER_LABEL:
+                    segment.speaker = best_speaker_for_segment(
+                        segment, diarization_turns
+                    )
+
+        transcript = Transcript(
+            source=str(source),
+            model=args.model,
+            language=getattr(info, "language", None),
+            language_probability=getattr(info, "language_probability", None),
+            duration=getattr(info, "duration", None),
+            segments=all_segments,
+            diarization=diarization_turns,
+        )
+
+        write_txt(base.with_suffix(".txt"), transcript)
+        write_srt(base.with_suffix(".srt"), transcript)
+        write_json(base.with_suffix(".json"), transcript)
+        written = [
+            base.with_suffix(".txt").name,
+            base.with_suffix(".srt").name,
+            base.with_suffix(".json").name,
+        ]
+        if diarization_turns is not None:
+            write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
+            written.append(base.with_suffix(".speakers.txt").name)
+            written.append(base.with_suffix(".rttm").name)
+        print(f"Wrote {', '.join(written)}", flush=True)
+
+    finally:
+        # Always clean up the mic companion file, even on error
+        if mic_path:
+            mic_path.unlink(missing_ok=True)
 
 
 def load_model(args: argparse.Namespace) -> "WhisperModel":

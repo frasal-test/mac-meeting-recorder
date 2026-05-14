@@ -81,10 +81,37 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startMicCapture() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
-        // Note: setVoiceProcessingEnabled is intentionally NOT used here —
-        // it takes exclusive control of the audio hardware and breaks Zoom/Teams.
-        // With headphones there is no echo to cancel anyway.
-        let format = inputNode.inputFormat(forBus: 0)
+
+        // On macOS 14+ enable hardware AEC. We must also disable the automatic
+        // ducking that VoiceProcessingIO applies to all other audio — without
+        // duckingLevel: .min the ScreenCaptureKit stream drops to ~-51 dB and
+        // the system-audio recording goes (nearly) silent.
+        // On macOS 13 we skip voice processing entirely to avoid that side-effect.
+        var voiceProcessingEnabled = false
+        if #available(macOS 14.0, *) {
+            do {
+                try inputNode.setVoiceProcessingEnabled(true)
+                inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                        enableAdvancedDucking: false, duckingLevel: .min)
+                voiceProcessingEnabled = true
+            } catch {
+                fputs("Voice processing unavailable (\(error.localizedDescription))\n", stderr)
+            }
+        }
+
+        // When VoiceProcessingIO is active the input node silently reconfigures
+        // itself to 9 channels; inputFormat(forBus:) returns that wrong layout
+        // and AVAudioFile crashes on write. Pin to mono 44 100 Hz instead.
+        let format: AVAudioFormat
+        if voiceProcessingEnabled {
+            guard let vp = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1) else {
+                throw RecorderError.micFormatUnavailable
+            }
+            format = vp
+        } else {
+            format = inputNode.inputFormat(forBus: 0)
+        }
 
         micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
 
@@ -139,42 +166,18 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             systemWriter?.finishWriting { cont.resume() }
         }
 
+        // Rename the system-audio temp file to the final output path.
+        // This makes it visible to the Python watcher and triggers transcription.
+        try? FileManager.default.removeItem(at: finalURL)
         do {
-            try await mergeAudio()
+            try FileManager.default.moveItem(at: systemTmpURL, to: finalURL)
         } catch {
-            fputs("Merge error: \(error.localizedDescription)\n", stderr)
+            fputs("Failed to finalize recording: \(error.localizedDescription)\n", stderr)
         }
-
-        try? FileManager.default.removeItem(at: systemTmpURL)
-        try? FileManager.default.removeItem(at: micTmpURL)
-    }
-
-    // MARK: - Merge
-
-    private func mergeAudio() async throws {
-        let composition = AVMutableComposition()
-
-        func addTrack(from url: URL) async throws {
-            let asset = AVURLAsset(url: url)
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let track = tracks.first else { return }
-            let duration = try await asset.load(.duration)
-            let compTrack = composition.addMutableTrack(
-                withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-            try compTrack?.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
-        }
-
-        if FileManager.default.fileExists(atPath: systemTmpURL.path) { try await addTrack(from: systemTmpURL) }
-        if FileManager.default.fileExists(atPath: micTmpURL.path)    { try await addTrack(from: micTmpURL) }
-
-        guard !composition.tracks.isEmpty else { throw RecorderError.noAudioCaptured }
-
-        guard let export = AVAssetExportSession(
-            asset: composition, presetName: AVAssetExportPresetAppleM4A)
-        else { throw RecorderError.exportFailed }
-
-        try await export.export(to: finalURL, as: .m4a)
+        // The mic temp file (._mic.caf) is kept next to the final recording so
+        // that the Python transcriber can transcribe it as the local-speaker
+        // track and interleave it with the system-audio transcript by timestamp.
+        // Python deletes it after transcription.
     }
 
     // MARK: - SCStreamOutput
@@ -249,14 +252,12 @@ private func vuBar(_ rms: Float, width: Int = 12) -> String {
 
 enum RecorderError: Error, LocalizedError {
     case noDisplay
-    case noAudioCaptured
-    case exportFailed
+    case micFormatUnavailable
 
     var errorDescription: String? {
         switch self {
-        case .noDisplay:       return "No display found"
-        case .noAudioCaptured: return "No audio was captured"
-        case .exportFailed:    return "Could not create export session"
+        case .noDisplay:            return "No display found"
+        case .micFormatUnavailable: return "Could not create mono 44100 Hz audio format"
         }
     }
 }
