@@ -20,6 +20,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var audioEngine: AVAudioEngine?
     private var micFile: AVAudioFile?
 
+    // VU meter levels (approximate, display only)
+    private var micLevel: Float = 0
+    private var systemLevel: Float = 0
+    private var vuTimer: DispatchSourceTimer?
+
     private var stopping = false
 
     init(url: URL) {
@@ -40,6 +45,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         } catch {
             fputs("Warning: microphone unavailable — recording system audio only. (\(error.localizedDescription))\n", stderr)
         }
+        startVUMeter()
     }
 
     private func startSystemCapture() async throws {
@@ -75,13 +81,9 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func startMicCapture() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
-
-        // Echo cancellation: remove remote audio (playing through speakers)
-        // from the microphone signal so it isn't captured twice.
-        if #available(macOS 14.0, *) {
-            try inputNode.setVoiceProcessingEnabled(true)
-        }
-
+        // Note: setVoiceProcessingEnabled is intentionally NOT used here —
+        // it takes exclusive control of the audio hardware and breaks Zoom/Teams.
+        // With headphones there is no echo to cancel anyway.
         let format = inputNode.inputFormat(forBus: 0)
 
         micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
@@ -89,9 +91,32 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             guard let self, !self.stopping else { return }
             try? self.micFile?.write(from: buffer)
+            self.micLevel = self.rms(buffer: buffer)
         }
 
         try audioEngine!.start()
+    }
+
+    // MARK: - VU meter
+
+    private func startVUMeter() {
+        print("")  // blank line that the VU meter will overwrite
+        vuTimer = DispatchSource.makeTimerSource(queue: .main)
+        vuTimer!.schedule(deadline: .now(), repeating: .milliseconds(150))
+        vuTimer!.setEventHandler { [weak self] in
+            guard let self else { return }
+            let mic = vuBar(self.micLevel)
+            let sys = vuBar(self.systemLevel)
+            print("\r  🎤 \(mic)  🔊 \(sys)  ", terminator: "")
+            fflush(stdout)
+        }
+        vuTimer!.resume()
+    }
+
+    private func stopVUMeter() {
+        vuTimer?.cancel()
+        vuTimer = nil
+        print("")  // newline after the VU meter line
     }
 
     // MARK: - Stop
@@ -100,10 +125,12 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !stopping else { return }
         stopping = true
 
+        stopVUMeter()
+
         // Stop microphone
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
-        micFile = nil  // flushes and closes the file
+        micFile = nil
 
         // Stop system audio
         try? await stream?.stopCapture()
@@ -112,7 +139,6 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             systemWriter?.finishWriting { cont.resume() }
         }
 
-        // Merge and write final file
         do {
             try await mergeAudio()
         } catch {
@@ -139,17 +165,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
         }
 
-        let systemExists = FileManager.default.fileExists(atPath: systemTmpURL.path)
-        let micExists    = FileManager.default.fileExists(atPath: micTmpURL.path)
+        if FileManager.default.fileExists(atPath: systemTmpURL.path) { try await addTrack(from: systemTmpURL) }
+        if FileManager.default.fileExists(atPath: micTmpURL.path)    { try await addTrack(from: micTmpURL) }
 
-        if systemExists { try await addTrack(from: systemTmpURL) }
-        if micExists    { try await addTrack(from: micTmpURL) }
+        guard !composition.tracks.isEmpty else { throw RecorderError.noAudioCaptured }
 
-        guard !composition.tracks.isEmpty else {
-            throw RecorderError.noAudioCaptured
-        }
-
-        // AVAssetExportSession automatically mixes multiple audio tracks
         guard let export = AVAssetExportSession(
             asset: composition, presetName: AVAssetExportPresetAppleM4A)
         else { throw RecorderError.exportFailed }
@@ -173,11 +193,49 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             systemSessionStarted = true
         }
         input.append(buf)
+        systemLevel = rms(sampleBuffer: buf)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         fputs("Stream error: \(error.localizedDescription)\n", stderr)
     }
+
+    // MARK: - Level helpers
+
+    private func rms(buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData?[0] else { return 0 }
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return 0 }
+        var sum: Float = 0
+        for i in 0..<n { sum += data[i] * data[i] }
+        return sqrt(sum / Float(n))
+    }
+
+    private func rms(sampleBuffer: CMSampleBuffer) -> Float {
+        var list = AudioBufferList()
+        var block: CMBlockBuffer?
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: nil,
+            bufferListOut: &list, bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: 0, blockBufferOut: &block) == noErr,
+              let data = list.mBuffers.mData else { return 0 }
+        let count = Int(list.mBuffers.mDataByteSize) / 4
+        guard count > 0 else { return 0 }
+        let floats = data.bindMemory(to: Float.self, capacity: count)
+        var sum: Float = 0
+        for i in 0..<count { sum += floats[i] * floats[i] }
+        return sqrt(sum / Float(count))
+    }
+}
+
+// MARK: - VU bar
+
+private func vuBar(_ rms: Float, width: Int = 12) -> String {
+    let db = 20 * log10(max(rms, 1e-9))
+    let level = min(max((db + 60) / 60, 0), 1)
+    let filled = Int(level * Float(width))
+    return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
 }
 
 // MARK: - Errors
