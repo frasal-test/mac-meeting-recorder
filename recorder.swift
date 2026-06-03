@@ -121,7 +121,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Stop
 
-    func stop() async {
+    func stop() async throws {
         guard !stopping else { return }
         stopping = true
 
@@ -136,15 +136,14 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         try? await stream?.stopCapture()
         systemInput?.markAsFinished()
         await withCheckedContinuation { cont in
-            systemWriter?.finishWriting { cont.resume() }
+            if let systemWriter {
+                systemWriter.finishWriting { cont.resume() }
+            } else {
+                cont.resume()
+            }
         }
 
-        do {
-            try await mergeAudio()
-        } catch {
-            fputs("Merge error: \(error.localizedDescription)\n", stderr)
-        }
-
+        try await mergeAudio()
         try? FileManager.default.removeItem(at: systemTmpURL)
         try? FileManager.default.removeItem(at: micTmpURL)
     }
@@ -255,8 +254,14 @@ let recorder  = Recorder(url: outputURL)
 
 func stopAndSave() {
     Task { @MainActor in
-        await recorder.stop()
-        exit(0)
+        do {
+            try await recorder.stop()
+            exit(0)
+        } catch {
+            fputs("Failed to save recording: \(error.localizedDescription)\n", stderr)
+            fputs("Temporary audio files were kept next to the requested output.\n", stderr)
+            exit(2)
+        }
     }
 }
 
@@ -269,6 +274,7 @@ stdinSource.setEventHandler {
 stdinSource.resume()
 
 // Stop on Ctrl+C or SIGTERM (used standalone)
+var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM] {
     signal(sig, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
@@ -277,6 +283,7 @@ for sig in [SIGINT, SIGTERM] {
         stopAndSave()
     }
     src.resume()
+    signalSources.append(src)
 }
 
 Task { @MainActor in

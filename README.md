@@ -90,14 +90,31 @@ Grant **Terminal** access in **System Settings → Privacy & Security**:
 
   ✓ Fatto!
 
-  Testo:     recordings/transcripts/2025-05-11T15-30-00.txt
-  Parlanti:  recordings/transcripts/2025-05-11T15-30-00.speakers.txt
-  Sottotit.: recordings/transcripts/2025-05-11T15-30-00.srt
+  Sessione:  recordings/2025-05-11T15-30-00
+  Audio:     recordings/2025-05-11T15-30-00/audio/meeting.m4a
+  Testo:     recordings/2025-05-11T15-30-00/transcripts/meeting.txt
+  Parlanti:  recordings/2025-05-11T15-30-00/transcripts/meeting.speakers.txt
+  Sottotit.: recordings/2025-05-11T15-30-00/transcripts/meeting.srt
 ```
 
 Press **Enter** to stop recording. The transcript appears automatically.
 
 ### Output files
+
+Each `./meet.sh` run creates one session folder:
+
+```text
+recordings/
+└── 2025-05-11T15-30-00/
+    ├── audio/
+    │   └── meeting.m4a
+    └── transcripts/
+        ├── meeting.txt
+        ├── meeting.srt
+        ├── meeting.json
+        ├── meeting.speakers.txt
+        └── meeting.rttm
+```
 
 | File | Description |
 |------|-------------|
@@ -124,24 +141,24 @@ Press **Enter** to stop recording. The transcript appears automatically.
 ## Transcribe an existing file
 
 ```bash
-.venv/bin/python -m meeting_recorder.cli recordings/my-meeting.m4a \
+.venv/bin/python -m meeting_recorder.cli recordings/2025-05-11T15-30-00/audio/meeting.m4a \
   --model medium --language it --diarize
 ```
 
-Add `--force` to re-transcribe a file that already has a transcript.
+When the input file is inside an `audio/` folder, outputs default to the sibling `transcripts/` folder. Add `--force` to re-transcribe a file that already has a transcript.
 
 ## Privacy
 
 All processing is fully local:
 - Models are downloaded from Hugging Face once and cached in `~/.cache/huggingface/hub/`
 - After the initial download, the tool works completely offline (VPN-safe)
-- Audio files stay in `recordings/`, transcripts in `recordings/transcripts/`
+- Audio files stay in each session's `audio/` folder; generated text, JSON, subtitles, and diarization files stay in `transcripts/`
 - Nothing is sent to any external service
 
 ## Advanced options
 
 ```bash
-.venv/bin/python -m meeting_recorder.cli recordings/ \
+.venv/bin/python -m meeting_recorder.cli recordings/2025-05-11T15-30-00/audio/ \
   --watch \
   --model large-v3 \
   --language it \

@@ -236,7 +236,11 @@ def output_dir_for(input_path: Path, explicit: Path | None) -> Path:
     if explicit:
         return explicit
     if input_path.is_dir():
+        if input_path.name == "audio":
+            return input_path.parent / "transcripts"
         return input_path / "transcripts"
+    if input_path.parent.name == "audio":
+        return input_path.parent.parent / "transcripts"
     return input_path.parent / "transcripts"
 
 

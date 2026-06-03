@@ -9,7 +9,7 @@
 #   ./meet.sh it diar 2          # Italian, diarization, 2 speakers (more accurate)
 #
 # Press Enter to stop recording.
-# The transcript appears automatically in recordings/transcripts/.
+# Each run creates recordings/<timestamp>/ with audio/ and transcripts/.
 set -euo pipefail
 
 MEETING_LANG="${1:-it}"
@@ -19,9 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SCRIPT_DIR/recorder.swift"
 BIN="$SCRIPT_DIR/.recorder"
 RECORDINGS_DIR="${RECORDINGS_DIR:-$SCRIPT_DIR/recordings}"
-TRANSCRIPTS_DIR="$RECORDINGS_DIR/transcripts"
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
-WATCHER_LOG="/tmp/meet_watcher_$$.log"
 
 # ── sanity checks ─────────────────────────────────────────────────────────────
 if [[ ! -x "$VENV_PYTHON" ]]; then
@@ -40,14 +38,18 @@ if [[ "$DIARIZE" != "diar" && "$DIARIZE" != "nodiar" ]]; then
     exit 1
 fi
 
-DIARIZE_FLAG=""
-if [[ "$DIARIZE" == "diar" ]]; then
-    DIARIZE_FLAG="--diarize"
+if [[ -n "$NUM_SPEAKERS" && ! "$NUM_SPEAKERS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "num_speakers must be a positive integer." >&2
+    exit 1
 fi
 
-NUM_SPEAKERS_FLAG=""
+TRANSCRIBE_ARGS=()
+if [[ "$DIARIZE" == "diar" ]]; then
+    TRANSCRIBE_ARGS+=(--diarize)
+fi
+
 if [[ -n "$NUM_SPEAKERS" && "$DIARIZE" == "diar" ]]; then
-    NUM_SPEAKERS_FLAG="--num-speakers $NUM_SPEAKERS"
+    TRANSCRIBE_ARGS+=(--num-speakers "$NUM_SPEAKERS")
 fi
 
 # ── compile recorder if needed ────────────────────────────────────────────────
@@ -64,70 +66,58 @@ else
     MODEL="${WHISPER_MODEL:-medium}"
 fi
 
-MEETING_LANGUAGE_FLAG=""
 if [[ "$MEETING_LANG" != "auto" ]]; then
-    MEETING_LANGUAGE_FLAG="--language $MEETING_LANG"
+    TRANSCRIBE_ARGS+=(--language "$MEETING_LANG")
 fi
-
-mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
-
-# ── start transcription watcher in background ─────────────────────────────────
-# stable-seconds=3: file is already complete when saved, no need to wait longer
-"$VENV_PYTHON" -m meeting_recorder.cli \
-    "$RECORDINGS_DIR" \
-    --watch \
-    --model "$MODEL" \
-    $MEETING_LANGUAGE_FLAG \
-    $DIARIZE_FLAG \
-    $NUM_SPEAKERS_FLAG \
-    --no-vad \
-    --stable-seconds 3 \
-    >"$WATCHER_LOG" 2>/dev/null &
-WATCHER_PID=$!
-
-cleanup() { kill "$WATCHER_PID" 2>/dev/null || true; rm -f "$WATCHER_LOG"; }
-trap cleanup EXIT INT TERM
 
 # ── start recording ───────────────────────────────────────────────────────────
 TS="$(date '+%Y-%m-%dT%H-%M-%S')"
-OUTPUT="$RECORDINGS_DIR/$TS.m4a"
-TRANSCRIPT="$TRANSCRIPTS_DIR/${TS}.txt"
+SESSION_DIR="$RECORDINGS_DIR/$TS"
+AUDIO_DIR="$SESSION_DIR/audio"
+TRANSCRIPTS_DIR="$SESSION_DIR/transcripts"
+OUTPUT="$AUDIO_DIR/meeting.m4a"
+TRANSCRIPT="$TRANSCRIPTS_DIR/meeting.txt"
+
+mkdir -p "$AUDIO_DIR" "$TRANSCRIPTS_DIR"
 
 echo ""
 echo "  Lingua: $MEETING_LANG | Modello: $MODEL | Diarizzazione: $DIARIZE"
+echo "  Sessione: $SESSION_DIR"
 echo "  ● Registrazione in corso — premi Invio per fermare"
 echo ""
 
 # Recorder runs in foreground: Enter stops it, SIGTERM also works
 "$BIN" "$OUTPUT"
 
+if [[ ! -s "$OUTPUT" ]]; then
+    echo "Recording failed or produced an empty file: $OUTPUT" >&2
+    exit 1
+fi
+
 # ── wait for transcript ───────────────────────────────────────────────────────
 echo ""
 echo "  ⏳ Trascrizione in corso..."
 
-ELAPSED=0
-# Wait as long as the watcher process is alive — no arbitrary timeout.
-# Exits early if the transcript appears or the watcher crashes.
-while [[ ! -f "$TRANSCRIPT" ]] && kill -0 "$WATCHER_PID" 2>/dev/null; do
-    sleep 3
-    ELAPSED=$((ELAPSED + 3))
-    MINS=$((ELAPSED / 60))
-    SECS=$((ELAPSED % 60))
-    LAST=$(tail -1 "$WATCHER_LOG" 2>/dev/null | sed 's/^[[:space:]]*//' | cut -c1-60)
-    printf "\r  ⏳ %dm %02ds  %s                    " $MINS $SECS "$LAST"
-done
-echo ""
+"$VENV_PYTHON" -m meeting_recorder.cli \
+    "$OUTPUT" \
+    --output-dir "$TRANSCRIPTS_DIR" \
+    --model "$MODEL" \
+    "${TRANSCRIBE_ARGS[@]}" \
+    --no-vad
 
 echo ""
 if [[ -f "$TRANSCRIPT" ]]; then
     echo "  ✓ Fatto!"
     echo ""
+    echo "  Sessione:  $SESSION_DIR"
+    echo "  Audio:     $OUTPUT"
     echo "  Testo:     $TRANSCRIPT"
-    echo "  Parlanti:  ${TRANSCRIPTS_DIR}/${TS}.speakers.txt"
-    echo "  Sottotit.: ${TRANSCRIPTS_DIR}/${TS}.srt"
+    echo "  Parlanti:  ${TRANSCRIPTS_DIR}/meeting.speakers.txt"
+    echo "  Sottotit.: ${TRANSCRIPTS_DIR}/meeting.srt"
     echo ""
 else
-    echo "  ⚠ Il watcher è terminato prima del transcript."
+    echo "  ⚠ Trascrizione terminata senza generare il transcript atteso."
     echo "  Controlla: $TRANSCRIPTS_DIR"
     echo ""
+    exit 1
 fi
