@@ -80,6 +80,7 @@ mkdir -p "$RECORDINGS_DIR" "$TRANSCRIPTS_DIR"
     $MEETING_LANGUAGE_FLAG \
     $DIARIZE_FLAG \
     $NUM_SPEAKERS_FLAG \
+    --no-vad \
     --stable-seconds 3 \
     >"$WATCHER_LOG" 2>/dev/null &
 WATCHER_PID=$!
