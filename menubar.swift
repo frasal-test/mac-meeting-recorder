@@ -32,6 +32,7 @@ final class MenuController: NSObject, @unchecked Sendable {
         self.pythonURL = projectURL.appendingPathComponent(".venv/bin/python")
         super.init()
         configureMenu()
+        resumePendingTranscriptions()
     }
 
     private func configureMenu() {
@@ -234,8 +235,6 @@ final class MenuController: NSObject, @unchecked Sendable {
             let worker = runControl([
                 "worker",
                 "--once",
-                "--session",
-                sessionURL.path,
             ])
             notify(
                 title: "TapRecord",
@@ -243,6 +242,12 @@ final class MenuController: NSObject, @unchecked Sendable {
                     ? "Transcript ready: \(sessionURL.lastPathComponent)"
                     : "Transcription needs attention: \(sessionURL.lastPathComponent)"
             )
+        }
+    }
+
+    private func resumePendingTranscriptions() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            _ = runControl(["worker", "--once"])
         }
     }
 

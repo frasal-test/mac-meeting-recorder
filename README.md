@@ -122,9 +122,11 @@ speaker and source track. Word timestamps are shifted by the same track offset.
 .venv/bin/python -m meeting_recorder.control worker --once
 ```
 
-Only one worker processes sessions at a time. A job found in `processing` state
-after an interrupted worker is returned to `pending`. Failed jobs remain
-retryable until `max_attempts` is reached.
+Only one worker processes sessions at a time. Every worker pass scans the entire
+pending queue, including sessions left by an earlier failure. The menu-bar app
+also runs a recovery pass when it starts. A job found in `processing` state
+after an interrupted worker is returned to `pending`; failed jobs remain
+retryable on subsequent passes until `max_attempts` is reached.
 
 ## Configuration and hook
 

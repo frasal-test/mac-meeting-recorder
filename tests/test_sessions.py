@@ -16,6 +16,7 @@ from meeting_recorder.benchmark import word_error_counts
 from meeting_recorder.session_transcription import merge_track_transcripts
 from meeting_recorder.sessions import (
     enqueue_session,
+    pending_sessions,
     read_json,
     recover_sessions,
     run_job,
@@ -94,6 +95,28 @@ class SessionQueueTests(unittest.TestCase):
         self.assertEqual(recovered, [self.session])
         recovered_job = read_json(self.session / "job.json")
         self.assertEqual(recovered_job["state"], "pending")
+
+    def test_pending_queue_includes_all_sessions(self) -> None:
+        enqueue_session(self.session)
+        second = self.root / "2026-07-29T10-30-00"
+        (second / "audio").mkdir(parents=True)
+        (second / "audio" / "mic.caf").write_bytes(b"audio")
+        write_json(
+            second / "meta.json",
+            {
+                "state": "recorded",
+                "tracks": {
+                    "mic": "audio/mic.caf",
+                    "system": "audio/system.caf",
+                },
+            },
+        )
+        enqueue_session(second)
+
+        self.assertEqual(
+            pending_sessions(self.root),
+            [self.session, second],
+        )
 
 
 class TrackMergeTests(unittest.TestCase):

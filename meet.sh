@@ -89,12 +89,12 @@ echo ""
 if [[ "$WAIT_FOR_TRANSCRIPT" == "1" ]]; then
     "$VENV_PYTHON" -m meeting_recorder.control \
         --config "${TAPRECORD_CONFIG:-$HOME/.config/taprecord/config.json}" \
-        worker --once --session "$SESSION_DIR"
+        worker --once
     echo "  ✓ Trascrizione completata: $SESSION_DIR/transcripts/transcript.md"
 else
     nohup "$VENV_PYTHON" -m meeting_recorder.control \
         --config "${TAPRECORD_CONFIG:-$HOME/.config/taprecord/config.json}" \
-        worker --once --session "$SESSION_DIR" \
+        worker --once \
         >>"$SESSION_DIR/transcribe.log" 2>&1 &
     WORKER_PID=$!
     echo "  ✓ Registrazione salvata; trascrizione in coda (PID $WORKER_PID)."

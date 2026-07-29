@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -17,7 +17,7 @@ TRANSCRIPT_FILE = "transcripts/transcript.json"
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def parse_time(value: str | None) -> datetime | None:
