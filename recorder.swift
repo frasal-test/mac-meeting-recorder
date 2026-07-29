@@ -1,48 +1,122 @@
 import AVFoundation
+import CoreMedia
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
+
+// MARK: - Session metadata
+
+private struct TrackOffsets: Encodable {
+    var mic: Double?
+    var system: Double?
+}
+
+private struct TrackFiles: Encodable {
+    let mic = "audio/mic.caf"
+    let system = "audio/system.caf"
+}
+
+private struct SessionMeta: Encodable {
+    let schemaVersion = 1
+    var state: String
+    let startedAt: String
+    var endedAt: String?
+    var durationSeconds: Double?
+    var trackStartOffsets: TrackOffsets
+    let tracks = TrackFiles()
+    var warnings: [String]
+    var error: String?
+}
+
+private func iso8601(_ date: Date = Date()) -> String {
+    ISO8601DateFormatter().string(from: date)
+}
 
 // MARK: - Recorder
 
 @available(macOS 13.0, *)
 final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let finalURL: URL
-    private let systemTmpURL: URL
-    private let micTmpURL: URL
+    private let sessionURL: URL
+    private let audioURL: URL
+    private let micURL: URL
+    private let systemURL: URL
+    private let metaURL: URL
 
-    // System audio (ScreenCaptureKit)
     private var stream: SCStream?
-    private var systemWriter: AVAssetWriter?
-    private var systemInput: AVAssetWriterInput?
-    private var systemSessionStarted = false
-
-    // Microphone (AVAudioEngine)
+    private var systemFile: AVAudioFile?
     private var audioEngine: AVAudioEngine?
     private var micFile: AVAudioFile?
 
-    // VU meter (microphone only)
     private var micLevel: Float = 0
+    private var systemLevel: Float = 0
     private var vuTimer: DispatchSourceTimer?
 
+    private let stateLock = NSLock()
     private var stopping = false
+    private var startedUptime = ProcessInfo.processInfo.systemUptime
+    private var metadata: SessionMeta
 
-    init(url: URL) {
-        self.finalURL = url
-        let base = url.deletingLastPathComponent()
-            .appendingPathComponent(url.deletingPathExtension().lastPathComponent)
-        self.systemTmpURL = URL(fileURLWithPath: base.path + "._sys.m4a")
-        self.micTmpURL    = URL(fileURLWithPath: base.path + "._mic.caf")
+    init(sessionURL: URL) {
+        self.sessionURL = sessionURL
+        self.audioURL = sessionURL.appendingPathComponent("audio", isDirectory: true)
+        self.micURL = audioURL.appendingPathComponent("mic.caf")
+        self.systemURL = audioURL.appendingPathComponent("system.caf")
+        self.metaURL = sessionURL.appendingPathComponent("meta.json")
+        self.metadata = SessionMeta(
+            state: "starting",
+            startedAt: iso8601(),
+            trackStartOffsets: TrackOffsets(),
+            warnings: []
+        )
         super.init()
+    }
+
+    // MARK: - Metadata
+
+    private func writeMetadata() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(metadata).write(to: metaURL, options: .atomic)
+    }
+
+    private func writeInitialMetadata() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(metadata).write(to: metaURL, options: .atomic)
+    }
+
+    private func setTrackOffset(_ track: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let offset = max(0, ProcessInfo.processInfo.systemUptime - startedUptime)
+        if track == "mic", metadata.trackStartOffsets.mic == nil {
+            metadata.trackStartOffsets.mic = offset
+            try? writeMetadata()
+        } else if track == "system", metadata.trackStartOffsets.system == nil {
+            metadata.trackStartOffsets.system = offset
+            try? writeMetadata()
+        }
     }
 
     // MARK: - Start
 
     func start() async throws {
+        try FileManager.default.createDirectory(
+            at: audioURL,
+            withIntermediateDirectories: true
+        )
+        startedUptime = ProcessInfo.processInfo.systemUptime
+        metadata.state = "recording"
+        try writeInitialMetadata()
+
         try await startSystemCapture()
         do {
             try startMicCapture()
         } catch {
-            fputs("Warning: microphone unavailable — recording system audio only. (\(error.localizedDescription))\n", stderr)
+            let warning = "Microphone unavailable; only system audio was recorded: \(error.localizedDescription)"
+            metadata.warnings.append(warning)
+            try? writeMetadata()
+            fputs("Warning: \(warning)\n", stderr)
         }
         startVUMeter()
     }
@@ -53,61 +127,113 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             throw RecorderError.noDisplay
         }
 
-        systemWriter = try AVAssetWriter(outputURL: systemTmpURL, fileType: .m4a)
-        systemInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000.0,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 192_000,
-        ])
-        systemInput!.expectsMediaDataInRealTime = true
-        systemWriter!.add(systemInput!)
-        systemWriter!.startWriting()
-
-        let cfg = SCStreamConfiguration()
-        cfg.capturesAudio = true
-        cfg.width = 2
-        cfg.height = 2
-        cfg.minimumFrameInterval = CMTime(seconds: 1, preferredTimescale: 1)
+        let configuration = SCStreamConfiguration()
+        configuration.capturesAudio = true
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(seconds: 1, preferredTimescale: 1)
 
         let filter = SCContentFilter(
-            display: display, excludingApplications: [], exceptingWindows: [])
-        stream = SCStream(filter: filter, configuration: cfg, delegate: self)
-        try stream!.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global())
+            display: display,
+            excludingApplications: [],
+            exceptingWindows: []
+        )
+        stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try stream!.addStreamOutput(
+            self,
+            type: .audio,
+            sampleHandlerQueue: DispatchQueue(label: "taprecord.system-audio")
+        )
         try await stream!.startCapture()
     }
 
     private func startMicCapture() throws {
         audioEngine = AVAudioEngine()
         let inputNode = audioEngine!.inputNode
-
-        // Request standard Float32 mono regardless of the hardware format.
-        // AVAudioEngine converts automatically, and floatChannelData is always
-        // non-nil for standard-format buffers so the VU meter always works.
-        let hwRate = inputNode.inputFormat(forBus: 0).sampleRate
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: hwRate, channels: 1) else {
+        let hardwareRate = inputNode.inputFormat(forBus: 0).sampleRate
+        guard
+            let format = AVAudioFormat(
+                standardFormatWithSampleRate: hardwareRate,
+                channels: 1
+            )
+        else {
             throw RecorderError.micFormatUnavailable
         }
 
-        micFile = try AVAudioFile(forWriting: micTmpURL, settings: format.settings)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+        micFile = try AVAudioFile(forWriting: micURL, settings: format.settings)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) {
+            [weak self] buffer, _ in
             guard let self, !self.stopping else { return }
-            try? self.micFile?.write(from: buffer)
+            if self.metadata.trackStartOffsets.mic == nil {
+                self.setTrackOffset("mic")
+            }
+            do {
+                try self.micFile?.write(from: buffer)
+            } catch {
+                fputs("Microphone write error: \(error.localizedDescription)\n", stderr)
+            }
             self.micLevel = self.rms(buffer: buffer)
         }
         try audioEngine!.start()
     }
 
+    // MARK: - System audio conversion
+
+    private func appendSystemAudio(_ sampleBuffer: CMSampleBuffer) {
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0 else { return }
+        guard
+            let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+            let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(description),
+            let format = AVAudioFormat(streamDescription: streamDescription),
+            let pcmBuffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(frameCount)
+            )
+        else {
+            fputs("Could not decode the system audio format\n", stderr)
+            return
+        }
+
+        pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
+        )
+        guard status == noErr else {
+            fputs("System audio conversion error: \(status)\n", stderr)
+            return
+        }
+
+        do {
+            if systemFile == nil {
+                systemFile = try AVAudioFile(
+                    forWriting: systemURL,
+                    settings: format.settings
+                )
+                setTrackOffset("system")
+            }
+            try systemFile?.write(from: pcmBuffer)
+            systemLevel = rms(buffer: pcmBuffer)
+        } catch {
+            fputs("System audio write error: \(error.localizedDescription)\n", stderr)
+        }
+    }
+
     // MARK: - VU meter
 
     private func startVUMeter() {
-        print("")  // blank line that the VU meter will overwrite
+        print("")
         vuTimer = DispatchSource.makeTimerSource(queue: .main)
         vuTimer!.schedule(deadline: .now(), repeating: .milliseconds(150))
         vuTimer!.setEventHandler { [weak self] in
             guard let self else { return }
-            let mic = vuBar(self.micLevel)
-            print("\r  🎤 \(mic)  ", terminator: "")
+            print(
+                "\r  🎤 \(vuBar(self.micLevel))  🔊 \(vuBar(self.systemLevel))  ",
+                terminator: ""
+            )
             fflush(stdout)
         }
         vuTimer!.resume()
@@ -116,7 +242,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func stopVUMeter() {
         vuTimer?.cancel()
         vuTimer = nil
-        print("")  // newline after the VU meter line
+        print("")
     }
 
     // MARK: - Stop
@@ -124,115 +250,87 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() async throws {
         guard !stopping else { return }
         stopping = true
-
         stopVUMeter()
 
-        // Stop microphone
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         micFile = nil
 
-        // Stop system audio
         try? await stream?.stopCapture()
-        systemInput?.markAsFinished()
-        await withCheckedContinuation { cont in
-            if let systemWriter {
-                systemWriter.finishWriting { cont.resume() }
-            } else {
-                cont.resume()
-            }
-        }
+        systemFile = nil
 
-        try await mergeAudio()
-        try? FileManager.default.removeItem(at: systemTmpURL)
-        try? FileManager.default.removeItem(at: micTmpURL)
+        metadata.state = "recorded"
+        metadata.endedAt = iso8601()
+        metadata.durationSeconds = max(
+            0,
+            ProcessInfo.processInfo.systemUptime - startedUptime
+        )
+        try writeMetadata()
     }
 
-    // MARK: - Merge
-
-    private func mergeAudio() async throws {
-        let composition = AVMutableComposition()
-
-        func addTrack(from url: URL) async throws {
-            let asset = AVURLAsset(url: url)
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let track = tracks.first else { return }
-            let duration = try await asset.load(.duration)
-            let compTrack = composition.addMutableTrack(
-                withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-            try compTrack?.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration), of: track, at: .zero)
-        }
-
-        if FileManager.default.fileExists(atPath: systemTmpURL.path) { try await addTrack(from: systemTmpURL) }
-        if FileManager.default.fileExists(atPath: micTmpURL.path)    { try await addTrack(from: micTmpURL) }
-
-        guard !composition.tracks.isEmpty else { throw RecorderError.noAudioCaptured }
-
-        guard let export = AVAssetExportSession(
-            asset: composition, presetName: AVAssetExportPresetAppleM4A)
-        else { throw RecorderError.exportFailed }
-
-        try await export.export(to: finalURL, as: .m4a)
+    func markFailed(_ error: Error) {
+        metadata.state = "recording_failed"
+        metadata.endedAt = iso8601()
+        metadata.durationSeconds = max(
+            0,
+            ProcessInfo.processInfo.systemUptime - startedUptime
+        )
+        metadata.error = error.localizedDescription
+        try? writeMetadata()
     }
 
     // MARK: - SCStreamOutput
 
     func stream(
         _ stream: SCStream,
-        didOutputSampleBuffer buf: CMSampleBuffer,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
         guard type == .audio, !stopping else { return }
-
-        guard let input = systemInput, input.isReadyForMoreMediaData else { return }
-        if !systemSessionStarted {
-            systemWriter?.startSession(atSourceTime: buf.presentationTimeStamp)
-            systemSessionStarted = true
-        }
-        input.append(buf)
+        appendSystemAudio(sampleBuffer)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         fputs("Stream error: \(error.localizedDescription)\n", stderr)
     }
 
-    // MARK: - Level helpers
+    // MARK: - Level helper
 
     private func rms(buffer: AVAudioPCMBuffer) -> Float {
         guard let data = buffer.floatChannelData?[0] else { return 0 }
-        let n = Int(buffer.frameLength)
-        guard n > 0 else { return 0 }
+        let count = Int(buffer.frameLength)
+        guard count > 0 else { return 0 }
         var sum: Float = 0
-        for i in 0..<n { sum += data[i] * data[i] }
-        return sqrt(sum / Float(n))
+        for index in 0 ..< count {
+            sum += data[index] * data[index]
+        }
+        return sqrt(sum / Float(count))
     }
-
 }
 
-// MARK: - VU bar
+// MARK: - UI helpers
 
 private func vuBar(_ rms: Float, width: Int = 12) -> String {
     let db = 20 * log10(max(rms, 1e-9))
     let level = min(max((db + 60) / 60, 0), 1)
     let filled = Int(level * Float(width))
-    return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
+    return String(repeating: "█", count: filled)
+        + String(repeating: "░", count: width - filled)
 }
-
-// MARK: - Errors
 
 enum RecorderError: Error, LocalizedError {
     case noDisplay
     case noAudioCaptured
-    case exportFailed
     case micFormatUnavailable
 
     var errorDescription: String? {
         switch self {
-        case .noDisplay:            return "No display found"
-        case .noAudioCaptured:      return "No audio was captured"
-        case .exportFailed:         return "Could not create export session"
-        case .micFormatUnavailable: return "Could not create Float32 mic format"
+        case .noDisplay:
+            return "No display found"
+        case .noAudioCaptured:
+            return "No audio was captured"
+        case .micFormatUnavailable:
+            return "Could not create the microphone audio format"
         }
     }
 }
@@ -243,14 +341,26 @@ guard #available(macOS 13.0, *) else {
     fputs("macOS 13.0 or later is required\n", stderr)
     exit(1)
 }
-
+if CommandLine.arguments.dropFirst().first == "--doctor" {
+    let screenAllowed = CGPreflightScreenCaptureAccess()
+    let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    let microphoneAllowed = microphoneStatus == .authorized
+    print(
+        "screen_audio=\(screenAllowed ? "authorized" : "missing") "
+            + "microphone=\(microphoneAllowed ? "authorized" : String(describing: microphoneStatus))"
+    )
+    exit(screenAllowed && microphoneAllowed ? 0 : 1)
+}
 guard CommandLine.arguments.count >= 2 else {
-    fputs("Usage: recorder <output.m4a>\n", stderr)
+    fputs("Usage: recorder <session-directory>\n", stderr)
     exit(1)
 }
 
-let outputURL = URL(fileURLWithPath: CommandLine.arguments[1])
-let recorder  = Recorder(url: outputURL)
+let sessionURL = URL(
+    fileURLWithPath: CommandLine.arguments[1],
+    isDirectory: true
+)
+let recorder = Recorder(sessionURL: sessionURL)
 
 func stopAndSave() {
     Task { @MainActor in
@@ -258,32 +368,36 @@ func stopAndSave() {
             try await recorder.stop()
             exit(0)
         } catch {
-            fputs("Failed to save recording: \(error.localizedDescription)\n", stderr)
-            fputs("Temporary audio files were kept next to the requested output.\n", stderr)
+            recorder.markFailed(error)
+            fputs("Failed to stop recording: \(error.localizedDescription)\n", stderr)
             exit(2)
         }
     }
 }
 
-// Stop on Enter (used by meet.sh)
-let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
+let stdinSource = DispatchSource.makeReadSource(
+    fileDescriptor: STDIN_FILENO,
+    queue: .main
+)
 stdinSource.setEventHandler {
     stdinSource.cancel()
     stopAndSave()
 }
 stdinSource.resume()
 
-// Stop on Ctrl+C or SIGTERM (used standalone)
 var signalSources: [DispatchSourceSignal] = []
-for sig in [SIGINT, SIGTERM] {
-    signal(sig, SIG_IGN)
-    let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    src.setEventHandler {
-        src.cancel()
+for signalNumber in [SIGINT, SIGTERM] {
+    signal(signalNumber, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(
+        signal: signalNumber,
+        queue: .main
+    )
+    source.setEventHandler {
+        source.cancel()
         stopAndSave()
     }
-    src.resume()
-    signalSources.append(src)
+    source.resume()
+    signalSources.append(source)
 }
 
 Task { @MainActor in
@@ -291,14 +405,25 @@ Task { @MainActor in
         try await recorder.start()
         fflush(stdout)
     } catch {
+        recorder.markFailed(error)
         fputs("Failed to start: \(error.localizedDescription)\n", stderr)
-        let msg = error.localizedDescription.lowercased()
-        if msg.contains("not authorized") || msg.contains("permission") || msg.contains("access") {
-            fputs("\nGrant Screen Recording permission to Terminal in:\n", stderr)
-            fputs("System Settings → Privacy & Security → Screen & System Audio Recording\n", stderr)
+        let message = error.localizedDescription.lowercased()
+        if message.contains("not authorized")
+            || message.contains("permission")
+            || message.contains("access")
+        {
+            fputs(
+                """
+
+                Grant Screen Recording permission to Terminal in:
+                System Settings → Privacy & Security → Screen & System Audio Recording
+
+                """,
+                stderr
+            )
         }
         exit(1)
     }
 }
 
-dispatchMain()
+RunLoop.main.run()

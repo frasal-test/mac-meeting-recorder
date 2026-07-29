@@ -83,6 +83,7 @@ class TranscriptSegment:
     end: float
     text: str
     speaker: str | None = None
+    track: str | None = None
     words: list[Word] | None = None
 
 
@@ -327,7 +328,7 @@ def write_speaker_txt(path: Path, transcript: Transcript) -> None:
         lines.append(f"[{timestamp}] {speaker}: {' '.join(current_text).strip()}")
 
     for segment in transcript.segments:
-        if segment.speaker != current_speaker:
+        if current_start is None or segment.speaker != current_speaker:
             flush()
             current_speaker = segment.speaker
             current_text = [segment.text.strip()]
@@ -346,6 +347,47 @@ def write_json(path: Path, transcript: Transcript) -> None:
         json.dumps(asdict(transcript), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def write_markdown(path: Path, transcript: Transcript) -> None:
+    lines = ["# Transcript", ""]
+    lines.append(f"- Source: `{transcript.source}`")
+    lines.append(f"- Model: `{transcript.model}`")
+    if transcript.language:
+        lines.append(f"- Language: `{transcript.language}`")
+    if transcript.duration is not None:
+        lines.append(f"- Duration: `{format_timestamp(transcript.duration, '.')}`")
+    lines.extend(["", "## Conversation", ""])
+
+    current_speaker: str | None = None
+    current_start: float | None = None
+    current_end: float | None = None
+    current_text: list[str] = []
+
+    def flush() -> None:
+        if not current_text or current_start is None or current_end is None:
+            return
+        speaker = current_speaker or "UNKNOWN"
+        timestamp = (
+            f"{format_timestamp(current_start, '.')}–"
+            f"{format_timestamp(current_end, '.')}"
+        )
+        lines.append(f"**{speaker}** · {timestamp}")
+        lines.append("")
+        lines.append(" ".join(current_text).strip())
+        lines.append("")
+
+    for segment in transcript.segments:
+        if current_start is None or segment.speaker != current_speaker:
+            flush()
+            current_speaker = segment.speaker
+            current_start = segment.start
+            current_text = [segment.text.strip()]
+        else:
+            current_text.append(segment.text.strip())
+        current_end = segment.end
+    flush()
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
@@ -517,16 +559,13 @@ def run_diarization(
         diarization_audio.unlink(missing_ok=True)
 
 
-def transcribe_file(
+def transcribe_source(
     model: "WhisperModel",
     diarizer: object | None,
     source: Path,
-    output_dir: Path,
     args: argparse.Namespace,
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    base = transcript_base(output_dir, source)
-
+    diarization_base: Path | None = None,
+) -> Transcript:
     print(f"Transcribing {source.name}...", flush=True)
     segments_iter, info = model.transcribe(
         str(source),
@@ -562,12 +601,21 @@ def transcribe_file(
             )
         )
 
-    diarization_turns = run_diarization(diarizer, source, base, args)
+    diarization_turns = None
+    if diarizer is not None:
+        if diarization_base is None:
+            raise ValueError("diarization_base is required with a diarizer")
+        diarization_turns = run_diarization(
+            diarizer,
+            source,
+            diarization_base,
+            args,
+        )
     if diarization_turns:
         for segment in segments:
             segment.speaker = best_speaker_for_segment(segment, diarization_turns)
 
-    transcript = Transcript(
+    return Transcript(
         source=str(source),
         model=args.model,
         language=getattr(info, "language", None),
@@ -577,13 +625,32 @@ def transcribe_file(
         diarization=diarization_turns,
     )
 
+
+def transcribe_file(
+    model: "WhisperModel",
+    diarizer: object | None,
+    source: Path,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base = transcript_base(output_dir, source)
+    transcript = transcribe_source(
+        model,
+        diarizer,
+        source,
+        args,
+        diarization_base=base,
+    )
     write_txt(base.with_suffix(".txt"), transcript)
     write_srt(base.with_suffix(".srt"), transcript)
     write_json(base.with_suffix(".json"), transcript)
+    write_markdown(base.with_suffix(".md"), transcript)
     written = [
         base.with_suffix(".txt").name,
         base.with_suffix(".srt").name,
         base.with_suffix(".json").name,
+        base.with_suffix(".md").name,
     ]
     if diarization_turns is not None:
         write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)

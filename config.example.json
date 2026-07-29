@@ -1,0 +1,13 @@
+{
+  "recordings_dir": "~/Recordings/TapRecord",
+  "on_stop": null,
+  "transcription": {
+    "enabled": true,
+    "model": "medium",
+    "language": "it",
+    "compute_type": "int8",
+    "diarize_system": true,
+    "word_timestamps": true,
+    "max_attempts": 3
+  }
+}

@@ -1,177 +1,247 @@
-# mac-meeting-recorder
+# TapRecord Whisper
 
-Record and transcribe Zoom/Teams/Meet meetings on macOS — locally, no cloud, no subscriptions.
+Local-first macOS meeting recorder and transcription pipeline.
 
-Captures **system audio** (remote participants) and **microphone** (you) simultaneously, mixes them, and transcribes everything with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Optional speaker diarization via [pyannote.audio](https://github.com/pyannote/pyannote-audio).
+TapRecord records microphone and system audio into **two persistent tracks**,
+transcribes them locally with `faster-whisper`, and merges both timelines using
+their real start offsets. The microphone track is deterministically labelled
+`ME`; optional pyannote diarization is applied only to the system track to
+separate remote participants.
 
-**Audio and transcripts never leave your machine.**
+Audio and transcripts stay on the Mac.
 
-> **Best results with headphones.** Without headphones the microphone picks up the laptop speakers, introducing echo in the recording. With headphones the two audio streams are completely isolated and the transcript is clean.
+## What changed
 
-## How it works
-
-- **Recording** — a Swift CLI uses [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) for system audio (remote participants) and `AVAudioEngine` for the microphone (you). The two streams are mixed into a single `.m4a` via `AVFoundation`. No virtual audio drivers, no device switching.
-- **Transcription** — a Python watcher picks up new files and runs `faster-whisper` on them, showing live segments and progress. Outputs `.txt`, `.srt`, and `.json`.
-- **Diarization** — optional speaker labels (`SPEAKER_00`, `SPEAKER_01`, …) via pyannote. Automatically uses MPS (Apple Silicon GPU), CUDA, or CPU — whichever is available.
+- Persistent `mic.caf` and `system.caf` tracks: no destructive pre-transcription
+  mix.
+- Atomic `meta.json` with timestamps, track offsets, duration and session state.
+- Persistent `job.json` queue with retry counters and interrupted-job recovery.
+- Serial worker: a new meeting can start while the previous one transcribes.
+- Combined TXT, SRT, JSON, Markdown, speaker transcript and optional RTTM.
+- Configurable `on_stop` hook.
+- `doctor` diagnostics.
+- Optional menu-bar daemon and LaunchAgent.
+- Separate faster-whisper versus FluidAudio/Parakeet benchmark harness.
 
 ## Requirements
 
 - macOS 13 or later
-- Xcode Command Line Tools (`xcode-select --install`)
+- Xcode Command Line Tools
 - Python 3.9+
-- [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`)
+- Headphones recommended
 
-## Setup
+Create the Python environment:
 
 ```bash
-git clone https://github.com/frasal-test/mac-meeting-recorder.git
-cd mac-meeting-recorder
-
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-For speaker diarization (optional):
+For remote-speaker diarization:
 
 ```bash
 .venv/bin/pip install -r requirements-diarization.txt
 ```
 
-Add your [Hugging Face](https://huggingface.co) read token to `.env` (required only for diarization):
+Add `HF_TOKEN=hf_...` to `.env` and accept the model conditions for:
+
+- <https://huggingface.co/pyannote/segmentation-3.0>
+- <https://huggingface.co/pyannote/speaker-diarization-3.1>
+
+On first recording, grant **TapRecord Recorder** access to:
+
+- Screen & System Audio Recording
+- Microphone
+
+For terminal-only use, macOS may also attribute the request to Terminal.
+
+## Record from the terminal
 
 ```bash
-echo "HF_TOKEN=hf_..." > .env
+./meet.sh [language] [diar|nodiar] [remote_speakers]
 ```
 
-You also need to accept the model conditions on Hugging Face for:
-- [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-- [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-
-### Permissions (one-time)
-
-Grant **Terminal** access in **System Settings → Privacy & Security**:
-- **Screen & System Audio Recording** — for remote participants' audio
-- **Microphone** — for your own voice
-
-## Usage
+Examples:
 
 ```bash
-./meet.sh [language] [diar|nodiar] [num_speakers]
+./meet.sh
+./meet.sh en
+./meet.sh es nodiar
+./meet.sh auto nodiar
+./meet.sh it diar 2
 ```
 
-| Argument | Options | Default |
-|----------|---------|---------|
-| language | `it` `en` `es` `auto` | `it` |
-| diarization | `diar` `nodiar` | `diar` |
-| num_speakers | integer | auto-detect |
-
-### Examples
+Press Enter to stop. Recording returns immediately after the session is queued;
+transcription continues in the background. To retain the previous synchronous
+behaviour:
 
 ```bash
-./meet.sh              # Italian + diarization, speakers auto-detected
-./meet.sh en           # English + diarization
-./meet.sh es nodiar    # Spanish, transcript only (no HF token needed)
-./meet.sh auto         # auto-detect language + diarization
-./meet.sh it diar 2    # Italian, diarization, force 2 speakers (more accurate)
+WAIT_FOR_TRANSCRIPT=1 ./meet.sh it diar 2
 ```
 
-### What you see
-
-```
-  Lingua: it | Modello: medium | Diarizzazione: diar
-  ● Registrazione in corso — premi Invio per fermare
-
-  🎤 ████░░░░░░░░  🔊 ██████████░░
-
-  [Invio]
-
-  ⏳ Trascrizione in corso...
-  ⏳ 1m 12s  [34%] Allora come dicevo...
-
-  ✓ Fatto!
-
-  Sessione:  recordings/2025-05-11T15-30-00
-  Audio:     recordings/2025-05-11T15-30-00/audio/meeting.m4a
-  Testo:     recordings/2025-05-11T15-30-00/transcripts/meeting.txt
-  Parlanti:  recordings/2025-05-11T15-30-00/transcripts/meeting.speakers.txt
-  Sottotit.: recordings/2025-05-11T15-30-00/transcripts/meeting.srt
-```
-
-Press **Enter** to stop recording. The transcript appears automatically.
-
-### Output files
-
-Each `./meet.sh` run creates one session folder:
+## Session format
 
 ```text
 recordings/
-└── 2025-05-11T15-30-00/
+└── 2026-07-29T10-30-00/
+    ├── meta.json
+    ├── job.json
+    ├── transcribe.log
     ├── audio/
-    │   └── meeting.m4a
+    │   ├── mic.caf
+    │   └── system.caf
     └── transcripts/
-        ├── meeting.txt
-        ├── meeting.srt
-        ├── meeting.json
-        ├── meeting.speakers.txt
-        └── meeting.rttm
+        ├── transcript.txt
+        ├── transcript.srt
+        ├── transcript.json
+        ├── transcript.md
+        ├── transcript.speakers.txt
+        └── transcript.rttm
 ```
 
-| File | Description |
-|------|-------------|
-| `.txt` | Plain transcript |
-| `.srt` | Subtitles with timestamps |
-| `.json` | Structured segments, word timestamps, metadata |
-| `.speakers.txt` | Transcript grouped by speaker (requires diarization) |
-| `.rttm` | Raw diarization turns (requires diarization) |
+`transcript.json` is the canonical output. Every segment contains its timeline,
+speaker and source track. Word timestamps are shifted by the same track offset.
 
-## Language detection
-
-- Pass a specific language (`it`, `en`, `es`) when the call has one predominant language — faster and more accurate.
-- Use `auto` for calls that mix languages: Whisper detects from the first 30 seconds and applies it to the whole file.
-- If the call starts in one language and switches to another, force the predominant language explicitly for best results.
-
-## Diarization notes
-
-- Diarization requires a free [Hugging Face](https://huggingface.co) account and accepting the pyannote model terms.
-- Device is selected automatically: **MPS** (Apple Silicon) → **CUDA** → **CPU**.
-- On an M3 Pro with MPS, expect ~5 min for a 1-hour call. On CPU alone, expect 20-30 min.
-- Use `nodiar` to skip diarization entirely — no HF account needed, transcription only.
-- If you know the exact number of speakers, pass it as the third argument for better accuracy.
-
-## Transcribe an existing file
+## Queue and recovery
 
 ```bash
-.venv/bin/python -m meeting_recorder.cli recordings/2025-05-11T15-30-00/audio/meeting.m4a \
-  --model medium --language it --diarize
+# Queue or requeue one session
+.venv/bin/python -m meeting_recorder.control enqueue <session>
+.venv/bin/python -m meeting_recorder.control enqueue <session> --force
+
+# Process one session synchronously
+.venv/bin/python -m meeting_recorder.control process <session>
+
+# Recover sessions left without a transcript
+.venv/bin/python -m meeting_recorder.control recover
+
+# Process the pending queue
+.venv/bin/python -m meeting_recorder.control worker --once
 ```
 
-When the input file is inside an `audio/` folder, outputs default to the sibling `transcripts/` folder. Add `--force` to re-transcribe a file that already has a transcript.
+Only one worker processes sessions at a time. A job found in `processing` state
+after an interrupted worker is returned to `pending`. Failed jobs remain
+retryable until `max_attempts` is reached.
 
-## Privacy
+## Configuration and hook
 
-All processing is fully local:
-- Models are downloaded from Hugging Face once and cached in `~/.cache/huggingface/hub/`
-- After the initial download, the tool works completely offline (VPN-safe)
-- Audio files stay in each session's `audio/` folder; generated text, JSON, subtitles, and diarization files stay in `transcripts/`
-- Nothing is sent to any external service
+The optional config file is `~/.config/taprecord/config.json`. Start from
+[`config.example.json`](config.example.json).
 
-## Advanced options
+`on_stop` is executed after all transcript files have been written. The session
+directory is available both as the first positional argument and as
+`TAPRECORD_SESSION_DIR`. A failed hook is logged but does not invalidate a valid
+transcript.
+
+```json
+{
+  "on_stop": "/path/to/archive-session",
+  "transcription": {
+    "model": "medium",
+    "language": "it",
+    "diarize_system": true,
+    "max_attempts": 3
+  }
+}
+```
+
+## Doctor
 
 ```bash
-.venv/bin/python -m meeting_recorder.cli recordings/2025-05-11T15-30-00/audio/ \
-  --watch \
-  --model large-v3 \
+./taprecord.sh doctor
+```
+
+It checks macOS, the Swift build, Python models, Hugging Face configuration,
+recordings directory and macOS recording permissions.
+
+## Menu bar and launch at login
+
+```bash
+# Build and run in the foreground
+./taprecord.sh run
+
+# Build, install a LaunchAgent and start it
+./taprecord.sh install
+
+# Disable the LaunchAgent; its plist is preserved as .disabled
+./taprecord.sh uninstall
+```
+
+The menu bar offers Italian, English, Spanish and automatic-language recording
+presets, plus Stop, elapsed time, recordings folder and doctor. It queues
+transcription with the selected language/model and posts a macOS notification
+when the job completes.
+
+## Transcribe existing media
+
+The original file/folder workflow remains available:
+
+```bash
+.venv/bin/python -m meeting_recorder.cli recording.m4a \
+  --model medium \
   --language it \
-  --diarize \
-  --word-timestamps
+  --diarize
 ```
 
-On Apple Silicon, `--compute-type int8` (default) is the fastest option.
-With a CUDA GPU: `--device cuda --compute-type float16`.
+Supported outputs now also include Markdown.
 
-## Legal note
+## FluidAudio / Parakeet benchmark
 
-Recording meetings may require consent depending on your jurisdiction and company policy. Make sure all participants are aware the call is being recorded.
+The benchmark is deliberately separate from production transcription. Current
+FluidAudio provides Parakeet v2 for English and v3 for multilingual evaluation,
+but adopting either engine should be based on representative meeting audio,
+technical vocabulary and measured WER.
+
+Run faster-whisper:
+
+```bash
+.venv/bin/python -m meeting_recorder.benchmark whisper sample.caf \
+  --reference reference.txt \
+  --model medium \
+  --language it \
+  --output benchmark/whisper.md
+```
+
+Run FluidAudio from a local FluidAudio checkout:
+
+```bash
+.venv/bin/python -m meeting_recorder.benchmark fluidaudio sample.caf \
+  --reference reference.txt \
+  --fluidaudio-dir /path/to/FluidAudio \
+  --model-version v3 \
+  --output benchmark/parakeet-v3.md
+```
+
+Evaluate pre-generated transcripts:
+
+```bash
+.venv/bin/python -m meeting_recorder.benchmark evaluate \
+  --reference reference.txt \
+  --candidate whisper=whisper.txt \
+  --candidate parakeet=parakeet.txt \
+  --output benchmark/comparison.md
+```
+
+The report records WER, elapsed time and real-time factor. At least three
+representative samples are recommended: Italian presales vocabulary, English,
+and a mixed-language meeting.
+
+## Privacy and legal note
+
+Processing is local. Models are downloaded once and cached locally. The optional
+`on_stop` hook is user-controlled and may change that privacy boundary.
+
+Recording meetings may require participant consent and compliance with company
+policy and applicable law.
+
+## Acknowledgements
+
+The two-track recording architecture, recoverable session model, background
+transcription queue, menu-bar workflow and post-processing hook were inspired
+by [digimata/quill](https://github.com/digimata/quill). TapRecord retains its
+own implementation and combines those architectural ideas with its existing
+multilingual `faster-whisper` pipeline, optional pyannote diarization and
+multi-format transcript outputs.
 
 ## License
 

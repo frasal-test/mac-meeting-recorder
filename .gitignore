@@ -6,4 +6,6 @@ transcripts/
 recordings/
 .DS_Store
 .recorder
+.taprecord-menu
 .watcher.log
+.menubar*.log
