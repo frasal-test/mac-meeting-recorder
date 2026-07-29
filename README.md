@@ -8,6 +8,9 @@ their real start offsets. The microphone track is deterministically labelled
 `ME`; optional pyannote diarization is applied only to the system track to
 separate remote participants.
 
+`faster-whisper` is the production transcription engine for every recording
+preset (Italian, English, Spanish and automatic language detection).
+
 Audio and transcripts stay on the Mac.
 
 ## What changed
@@ -21,7 +24,7 @@ Audio and transcripts stay on the Mac.
 - Configurable `on_stop` hook.
 - `doctor` diagnostics.
 - Optional menu-bar daemon and LaunchAgent.
-- Separate faster-whisper versus FluidAudio/Parakeet benchmark harness.
+- Optional, development-only ASR benchmark harness.
 
 ## Requirements
 
@@ -185,12 +188,17 @@ The original file/folder workflow remains available:
 
 Supported outputs now also include Markdown.
 
-## FluidAudio / Parakeet benchmark
+## Optional ASR benchmark for development
 
-The benchmark is deliberately separate from production transcription. Current
-FluidAudio provides Parakeet v2 for English and v3 for multilingual evaluation,
-but adopting either engine should be based on representative meeting audio,
-technical vocabulary and measured WER.
+TapRecord does **not** use FluidAudio or Parakeet during normal recording or
+transcription. Production sessions continue to use `faster-whisper`; FluidAudio
+is not installed by the standard requirements and is never invoked
+automatically.
+
+The separate benchmark command exists only to compare experimental ASR engines
+on representative audio before considering any future change. It can measure
+WER and processing speed for `faster-whisper`, FluidAudio/Parakeet or
+pre-generated transcripts.
 
 Run faster-whisper:
 
