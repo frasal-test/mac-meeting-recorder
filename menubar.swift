@@ -436,23 +436,22 @@ final class MenuController: NSObject, @unchecked Sendable {
             return
         }
 
+        // The job always reports a fraction, even for steps that cannot
+        // describe their own progress. Showing it keeps the menu bar readable
+        // during those steps instead of collapsing to a bare ellipsis.
         let title = phaseTitle(progress.phase)
+        let percent = Int((progress.fraction * 100).rounded())
+        progressLabel?.stringValue = "\(title) — \(percent)%"
         if progress.indeterminate {
-            progressLabel?.stringValue = "\(title)…"
             progressIndicator?.isIndeterminate = true
             progressIndicator?.startAnimation(nil)
-            if activeRecorder == nil {
-                statusItem.button?.title = "✒︎ …"
-            }
         } else {
-            let percent = Int((progress.fraction * 100).rounded())
-            progressLabel?.stringValue = "\(title) — \(percent)%"
             progressIndicator?.stopAnimation(nil)
             progressIndicator?.isIndeterminate = false
             progressIndicator?.doubleValue = progress.fraction
-            if activeRecorder == nil {
-                statusItem.button?.title = "✒︎ \(percent)%"
-            }
+        }
+        if activeRecorder == nil {
+            statusItem.button?.title = "✒︎ \(percent)%"
         }
         progressLabel?.toolTip = progress.detail
     }

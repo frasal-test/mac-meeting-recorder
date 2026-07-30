@@ -296,7 +296,15 @@ class SessionProcessor:
                         if running
                         else "Remote speakers separated"
                     ),
-                    indeterminate=running,
+                ),
+                # pyannote reports real progress, so this phase no longer has
+                # to sit still: it was the slowest one and the only heavy step
+                # the bar could not describe.
+                diarization_progress=lambda value: update_job_progress(
+                    session_dir,
+                    phase="diarizing_system",
+                    fraction=0.72 + value * 0.16,
+                    detail="Separating remote speakers",
                 ),
             )
 

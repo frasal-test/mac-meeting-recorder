@@ -10,6 +10,7 @@ from meeting_recorder.cli import (
     Transcript,
     TranscriptSegment,
     Word,
+    diarization_progress_hook,
     write_markdown,
 )
 from meeting_recorder.benchmark import word_error_counts
@@ -162,6 +163,39 @@ class SessionQueueTests(unittest.TestCase):
         args = transcription_args(config)
         self.assertFalse(args.no_vad)
         self.assertEqual(args.hallucination_silence_threshold, 2.0)
+
+
+class DiarizationProgressTests(unittest.TestCase):
+    """pyannote only reports total/completed for the embeddings step, so that
+    is the one that has to produce a moving bar."""
+
+    def run_pipeline_steps(self) -> list[float]:
+        seen: list[float] = []
+        hook = diarization_progress_hook(seen.append)
+        hook("segmentation", object())
+        hook("speaker_counting", object())
+        hook("embeddings", None, total=4, completed=0)
+        for index in range(1, 5):
+            hook("embeddings", object(), total=4, completed=index)
+        hook("embeddings", object())
+        hook("discrete_diarization", object())
+        return seen
+
+    def test_progress_is_monotonic_and_complete(self) -> None:
+        seen = self.run_pipeline_steps()
+        self.assertEqual(seen, sorted(seen))
+        self.assertEqual(seen[-1], 1.0)
+
+    def test_embeddings_step_reports_intermediate_progress(self) -> None:
+        seen = self.run_pipeline_steps()
+        between = [value for value in seen if 0.40 < value < 0.90]
+        self.assertTrue(between, "embeddings must move the bar, not just jump")
+
+    def test_unknown_step_is_ignored(self) -> None:
+        seen: list[float] = []
+        hook = diarization_progress_hook(seen.append)
+        hook("a_step_pyannote_added_later", object())
+        self.assertEqual(seen, [])
 
 
 class TrackMergeTests(unittest.TestCase):

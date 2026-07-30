@@ -519,11 +519,56 @@ def run_with_elapsed_status(
         reporter.join(timeout=1)
 
 
+# pyannote calls its hook once per pipeline step, in this order. Only
+# "embeddings" reports total/completed, and it is also the slowest step, so it
+# gets the widest band — that is what makes the bar actually move. The others
+# fire once, on completion, so they can only snap to their end value.
+DIARIZATION_STEPS: tuple[tuple[str, float, float], ...] = (
+    ("segmentation", 0.0, 0.35),
+    ("speaker_counting", 0.35, 0.40),
+    ("embeddings", 0.40, 0.90),
+    ("discrete_diarization", 0.90, 1.0),
+)
+
+
+def diarization_progress_hook(
+    callback: Callable[[float], None],
+) -> Callable[..., None]:
+    bounds = {name: (start, end) for name, start, end in DIARIZATION_STEPS}
+    last_reported = -1.0
+
+    def hook(
+        step_name: str,
+        step_artifact: object,
+        file: object = None,
+        total: int | None = None,
+        completed: int | None = None,
+    ) -> None:
+        nonlocal last_reported
+        span = bounds.get(step_name)
+        if span is None:
+            return
+        start, end = span
+        if completed is None or not total:
+            fraction = end
+        else:
+            fraction = start + (end - start) * min(1.0, completed / total)
+        # The embeddings step fires per batch; writing job.json every time
+        # would be far more I/O than the progress bar can express.
+        if fraction < last_reported + 0.01 and fraction < 1.0:
+            return
+        last_reported = fraction
+        callback(fraction)
+
+    return hook
+
+
 def run_diarization(
     diarizer: object | None,
     source: Path,
     base: Path,
     args: argparse.Namespace,
+    progress_callback: Callable[[float], None] | None = None,
 ) -> list[DiarizationTurn] | None:
     if diarizer is None:
         return None
@@ -537,6 +582,8 @@ def run_diarization(
             "audio": str(diarization_audio),
         }
         kwargs = diarization_kwargs(args)
+        if progress_callback is not None:
+            kwargs["hook"] = diarization_progress_hook(progress_callback)
         diarization = run_with_elapsed_status(
             "Diarization",
             30,
@@ -557,6 +604,7 @@ def transcribe_source(
     diarization_base: Path | None = None,
     progress_callback: Callable[[float], None] | None = None,
     diarization_callback: Callable[[bool], None] | None = None,
+    diarization_progress: Callable[[float], None] | None = None,
 ) -> Transcript:
     print(f"Transcribing {source.name}...", flush=True)
     if progress_callback is not None:
@@ -614,6 +662,7 @@ def transcribe_source(
                 source,
                 diarization_base,
                 args,
+                progress_callback=diarization_progress,
             )
         finally:
             if diarization_callback is not None:
