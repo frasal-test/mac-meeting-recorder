@@ -1,5 +1,5 @@
 {
-  "recordings_dir": "~/Recordings/TapRecord",
+  "recordings_dir": "~/Recordings/MeetRec",
   "on_stop": null,
   "transcription": {
     "enabled": true,
@@ -8,6 +8,8 @@
     "compute_type": "int8",
     "diarize_system": true,
     "word_timestamps": true,
-    "max_attempts": 3
+    "max_attempts": 3,
+    "vad_filter": false,
+    "hallucination_silence_threshold": null
   }
 }

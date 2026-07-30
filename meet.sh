@@ -13,7 +13,6 @@ MEETING_LANG="${1:-it}"
 DIARIZE="${2:-diar}"
 NUM_SPEAKERS="${3:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RECORDER_SOURCE="$SCRIPT_DIR/recorder.swift"
 RECORDER_BINARY="$SCRIPT_DIR/.recorder"
 RECORDINGS_DIR="${RECORDINGS_DIR:-$SCRIPT_DIR/recordings}"
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
@@ -37,13 +36,9 @@ if [[ -n "$NUM_SPEAKERS" && ! "$NUM_SPEAKERS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-if [[ ! -f "$RECORDER_BINARY" || "$RECORDER_SOURCE" -nt "$RECORDER_BINARY" ]]; then
-    echo "Compiling recorder.swift..."
-    swiftc -framework ScreenCaptureKit -framework AVFoundation \
-        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-        -Xlinker "$SCRIPT_DIR/Recorder-Info.plist" \
-        -O "$RECORDER_SOURCE" -o "$RECORDER_BINARY"
-fi
+# taprecord.sh owns the build rules, including the staleness check and the
+# ad-hoc signature. Re-signing on every run would reset the TCC grants.
+"$SCRIPT_DIR/taprecord.sh" build-recorder
 
 if [[ "$MEETING_LANG" == "en" ]]; then
     MODEL="${WHISPER_MODEL:-medium.en}"

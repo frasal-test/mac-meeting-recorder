@@ -5,20 +5,24 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>.taprecord-menu</string>
+	<string>MeetRec</string>
     <key>CFBundleIdentifier</key>
-    <string>com.frasal.taprecord.menubar</string>
+    <string>com.frasal.meetrec.menubar</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>TapRecord</string>
+    <string>MeetRec</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <key>LSUIElement</key>
-    <true/>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MeetRec records your microphone as a separate local meeting track.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>MeetRec records system audio for local meeting transcription.</string>
 </dict>
 </plist>

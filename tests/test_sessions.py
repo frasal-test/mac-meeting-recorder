@@ -13,13 +13,18 @@ from meeting_recorder.cli import (
     write_markdown,
 )
 from meeting_recorder.benchmark import word_error_counts
-from meeting_recorder.session_transcription import merge_track_transcripts
+from meeting_recorder.config import AppConfig, TranscriptionConfig
+from meeting_recorder.session_transcription import (
+    merge_track_transcripts,
+    transcription_args,
+)
 from meeting_recorder.sessions import (
     enqueue_session,
     pending_sessions,
     read_json,
     recover_sessions,
     run_job,
+    update_job_progress,
 )
 
 
@@ -56,8 +61,15 @@ class SessionQueueTests(unittest.TestCase):
         )
         self.assertEqual(job["state"], "pending")
         self.assertEqual(job["options"]["language"], "it")
+        self.assertEqual(job["progress"]["phase"], "queued")
 
         def complete(session: Path) -> None:
+            update_job_progress(
+                session,
+                phase="writing_outputs",
+                fraction=0.94,
+                detail="Writing transcript files",
+            )
             transcript = session / "transcripts" / "transcript.json"
             transcript.parent.mkdir(parents=True)
             transcript.write_text("{}", encoding="utf-8")
@@ -69,6 +81,10 @@ class SessionQueueTests(unittest.TestCase):
             "complete",
         )
         self.assertEqual(
+            read_json(self.session / "job.json")["progress"]["fraction"],
+            1.0,
+        )
+        self.assertEqual(
             read_json(self.session / "meta.json")["state"],
             "transcribed",
         )
@@ -77,11 +93,21 @@ class SessionQueueTests(unittest.TestCase):
         enqueue_session(self.session, max_attempts=2)
 
         def fail(_: Path) -> None:
+            update_job_progress(
+                self.session,
+                phase="diarizing_system",
+                fraction=0.72,
+                detail="Separating speakers",
+                indeterminate=True,
+            )
             raise RuntimeError("boom")
 
         first = run_job(self.session, fail)
+        retry_job = read_json(self.session / "job.json")
         second = run_job(self.session, fail)
         self.assertEqual(first.state, "pending")
+        self.assertEqual(retry_job["progress"]["phase"], "retrying")
+        self.assertEqual(retry_job["progress"]["fraction"], 0.72)
         self.assertEqual(second.state, "failed")
         self.assertEqual(second.attempts, 2)
 
@@ -117,6 +143,25 @@ class SessionQueueTests(unittest.TestCase):
             pending_sessions(self.root),
             [self.session, second],
         )
+
+    def test_session_pipeline_disables_speech_filters_by_default(self) -> None:
+        """VAD and the hallucination heuristic silently drop quiet microphone
+        speech, so the session pipeline must leave both off unless asked."""
+        args = transcription_args(AppConfig(recordings_dir=self.root))
+        self.assertTrue(args.no_vad)
+        self.assertIsNone(args.hallucination_silence_threshold)
+
+    def test_session_pipeline_honours_configured_speech_filters(self) -> None:
+        config = AppConfig(
+            recordings_dir=self.root,
+            transcription=TranscriptionConfig(
+                vad_filter=True,
+                hallucination_silence_threshold=2.0,
+            ),
+        )
+        args = transcription_args(config)
+        self.assertFalse(args.no_vad)
+        self.assertEqual(args.hallucination_silence_threshold, 2.0)
 
 
 class TrackMergeTests(unittest.TestCase):

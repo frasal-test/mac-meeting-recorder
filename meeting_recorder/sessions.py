@@ -96,12 +96,38 @@ def default_job(max_attempts: int) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "state": "pending",
+        "progress": {
+            "phase": "queued",
+            "fraction": 0.0,
+            "detail": "Waiting for the transcription worker",
+            "indeterminate": False,
+        },
         "attempts": 0,
         "max_attempts": max_attempts,
         "created_at": utc_now(),
         "updated_at": utc_now(),
         "last_error": None,
     }
+
+
+def update_job_progress(
+    session_dir: Path,
+    *,
+    phase: str,
+    fraction: float,
+    detail: str,
+    indeterminate: bool = False,
+) -> None:
+    job_path = session_dir / JOB_FILE
+    job = read_json(job_path)
+    job["progress"] = {
+        "phase": phase,
+        "fraction": min(1.0, max(0.0, float(fraction))),
+        "detail": detail,
+        "indeterminate": indeterminate,
+    }
+    job["updated_at"] = utc_now()
+    atomic_write_json(job_path, job)
 
 
 def enqueue_session(
@@ -133,6 +159,12 @@ def enqueue_session(
 
     job["state"] = "pending"
     job["updated_at"] = utc_now()
+    job["progress"] = {
+        "phase": "queued",
+        "fraction": 0.0,
+        "detail": "Waiting for the transcription worker",
+        "indeterminate": False,
+    }
     if options:
         job["options"] = options
     if force:
@@ -205,11 +237,18 @@ def run_job(
         }
     )
     atomic_write_json(job_path, job)
+    update_job_progress(
+        session_dir,
+        phase="starting",
+        fraction=0.02,
+        detail=f"Starting attempt {attempts}/{maximum}",
+    )
     append_log(session_dir, f"Processing attempt {attempts}/{maximum}")
 
     try:
         processor(session_dir)
     except Exception as exc:
+        job = read_json(job_path)
         state = "failed" if attempts >= maximum else "pending"
         job.update(
             {
@@ -218,6 +257,14 @@ def run_job(
                 "last_error": f"{type(exc).__name__}: {exc}",
             }
         )
+        job["progress"] = {
+            "phase": "failed" if state == "failed" else "retrying",
+            "fraction": float(
+                job.get("progress", {}).get("fraction", 0.0)
+            ),
+            "detail": f"{type(exc).__name__}: {exc}",
+            "indeterminate": False,
+        }
         atomic_write_json(job_path, job)
         append_log(session_dir, f"Attempt failed: {job['last_error']}")
         return JobResult(session_dir, state, attempts, job["last_error"])
@@ -230,6 +277,12 @@ def run_job(
             "last_error": None,
         }
     )
+    job["progress"] = {
+        "phase": "complete",
+        "fraction": 1.0,
+        "detail": "Transcript ready",
+        "indeterminate": False,
+    }
     atomic_write_json(job_path, job)
     meta_path = session_dir / META_FILE
     meta = read_json(meta_path)

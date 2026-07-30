@@ -26,6 +26,7 @@ from .sessions import (
     read_json,
     run_on_stop,
     track_paths,
+    update_job_progress,
 )
 
 
@@ -40,7 +41,10 @@ def transcription_args(config: AppConfig) -> argparse.Namespace:
         beam_size=5,
         cpu_threads=0,
         word_timestamps=settings.word_timestamps,
-        no_vad=True,
+        no_vad=not settings.vad_filter,
+        hallucination_silence_threshold=(
+            settings.hallucination_silence_threshold
+        ),
         diarize=settings.diarize_system,
         diarization_model="pyannote/speaker-diarization-3.1",
         hf_token=None,
@@ -230,6 +234,13 @@ class SessionProcessor:
         paths = track_paths(session_dir, meta)
         output_dir = session_dir / "transcripts"
         output_dir.mkdir(parents=True, exist_ok=True)
+        update_job_progress(
+            session_dir,
+            phase="loading_model",
+            fraction=0.05,
+            detail=f"Loading faster-whisper {self.args.model}",
+            indeterminate=True,
+        )
 
         mic = None
         if paths["mic"].is_file() and paths["mic"].stat().st_size:
@@ -239,28 +250,77 @@ class SessionProcessor:
                 None,
                 paths["mic"],
                 self.args,
+                progress_callback=lambda value: update_job_progress(
+                    session_dir,
+                    phase="transcribing_microphone",
+                    fraction=0.10 + value * 0.25,
+                    detail="Transcribing microphone track",
+                ),
             )
 
         system = None
         if paths["system"].is_file() and paths["system"].stat().st_size:
             append_log(session_dir, "Transcribing system track")
+            diarizer = None
+            if self.args.diarize:
+                update_job_progress(
+                    session_dir,
+                    phase="loading_diarizer",
+                    fraction=0.37,
+                    detail="Loading pyannote speaker diarization",
+                    indeterminate=True,
+                )
+                diarizer = self.diarizer()
             system = transcribe_source(
                 self.model,
-                self.diarizer(),
+                diarizer,
                 paths["system"],
                 self.args,
                 diarization_base=output_dir / "system",
+                progress_callback=lambda value: update_job_progress(
+                    session_dir,
+                    phase="transcribing_system",
+                    fraction=0.40 + value * 0.28,
+                    detail="Transcribing system audio",
+                ),
+                diarization_callback=lambda running: update_job_progress(
+                    session_dir,
+                    phase=(
+                        "diarizing_system"
+                        if running
+                        else "diarization_complete"
+                    ),
+                    fraction=0.72 if running else 0.88,
+                    detail=(
+                        "Separating remote speakers"
+                        if running
+                        else "Remote speakers separated"
+                    ),
+                    indeterminate=running,
+                ),
             )
 
         if mic is None and system is None:
             raise ValueError("The session has no readable audio tracks")
 
+        update_job_progress(
+            session_dir,
+            phase="merging",
+            fraction=0.90,
+            detail="Merging microphone and system timelines",
+        )
         transcript = merge_track_transcripts(
             session_dir=session_dir,
             meta=meta,
             mic=mic,
             system=system,
             model=self.args.model,
+        )
+        update_job_progress(
+            session_dir,
+            phase="writing_outputs",
+            fraction=0.94,
+            detail="Writing transcript files",
         )
         base = output_dir / "transcript"
         write_txt(base.with_suffix(".txt"), transcript)
@@ -279,6 +339,13 @@ class SessionProcessor:
             )
 
         if self.config.on_stop:
+            update_job_progress(
+                session_dir,
+                phase="on_stop",
+                fraction=0.98,
+                detail="Running final hook",
+                indeterminate=True,
+            )
             try:
                 run_on_stop(self.config.on_stop, session_dir)
                 append_log(session_dir, "on_stop hook complete")

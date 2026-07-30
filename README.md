@@ -1,8 +1,8 @@
-# TapRecord Whisper
+# MeetRec
 
 Local-first macOS meeting recorder and transcription pipeline.
 
-TapRecord records microphone and system audio into **two persistent tracks**,
+MeetRec records microphone and system audio into **two persistent tracks**,
 transcribes them locally with `faster-whisper`, and merges both timelines using
 their real start offsets. The microphone track is deterministically labelled
 `ME`; optional pyannote diarization is applied only to the system track to
@@ -12,6 +12,11 @@ separate remote participants.
 preset (Italian, English, Spanish and automatic language detection).
 
 Audio and transcripts stay on the Mac.
+
+The menu-bar application captures both audio tracks directly in its own
+process. This gives macOS one stable app identity for Microphone and Screen &
+System Audio permissions. The terminal command uses the same shared Swift
+recording core through a separate CLI executable.
 
 ## What changed
 
@@ -23,7 +28,10 @@ Audio and transcripts stay on the Mac.
 - Combined TXT, SRT, JSON, Markdown, speaker transcript and optional RTTM.
 - Configurable `on_stop` hook.
 - `doctor` diagnostics.
-- Optional menu-bar daemon and LaunchAgent.
+- Menu-bar daemon with recording timer, persistent transcription progress and
+  LaunchAgent.
+- Speech filtering (VAD, silence-hallucination removal) available but off by
+  default, because both discard quiet microphone speech.
 - Optional, development-only ASR benchmark harness.
 
 ## Requirements
@@ -51,12 +59,55 @@ Add `HF_TOKEN=hf_...` to `.env` and accept the model conditions for:
 - <https://huggingface.co/pyannote/segmentation-3.0>
 - <https://huggingface.co/pyannote/speaker-diarization-3.1>
 
-On first recording, grant **TapRecord Recorder** access to:
+On first menu-bar recording, grant **MeetRec** access to:
 
 - Screen & System Audio Recording
 - Microphone
 
-For terminal-only use, macOS may also attribute the request to Terminal.
+For terminal-only use, grant the separately listed **MeetRec Recorder**
+process; macOS may also attribute the request to Terminal.
+
+### Stable signing
+
+Do this once, or macOS re-asks for permissions after every rebuild.
+
+Without a signing certificate the build falls back to an ad-hoc signature,
+whose designated requirement is the binary's own `cdhash`. Every recompile
+produces a new hash, so the grant macOS stored no longer matches and it prompts
+again — while the old entry stays in the Privacy pane, switched on but inert.
+
+Create a self-signed code-signing certificate:
+
+1. Open **Keychain Access**.
+2. Menu **Keychain Access → Certificate Assistant → Create a Certificate…**
+3. Name: `MeetRec Dev`
+4. Identity Type: **Self Signed Root**
+5. Certificate Type: **Code Signing**
+6. **Create**, then **Done**.
+
+Confirm it is usable — it must appear in:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+If it does not, open it in Keychain Access, expand **Trust**, and set **Code
+Signing** to *Always Trust*.
+
+Builds pick it up automatically. Override the name with `MEETREC_SIGN_IDENTITY`
+if you prefer a different one.
+
+Then clear the stale grants so the next launch registers cleanly:
+
+```bash
+tccutil reset ScreenCapture com.frasal.meetrec.menubar
+```
+
+```bash
+tccutil reset Microphone com.frasal.meetrec.menubar
+```
+
+Rebuild, restart the agent, and grant the prompts one final time.
 
 ## Record from the terminal
 
@@ -144,11 +195,30 @@ transcript.
   "transcription": {
     "model": "medium",
     "language": "it",
+    "compute_type": "int8",
     "diarize_system": true,
-    "max_attempts": 3
+    "max_attempts": 3,
+    "vad_filter": false,
+    "hallucination_silence_threshold": null
   }
 }
 ```
+
+### Speech filtering
+
+Both filters are **off by default** and should normally stay that way.
+
+- `vad_filter` — faster-whisper's voice activity detection. It drops audio it
+  judges to be non-speech, which on a quiet or intermittent microphone track
+  silently removes real speech. Enable it only for a recording where noise is
+  the bigger problem.
+- `hallucination_silence_threshold` — seconds of silence after which a segment
+  is discarded as a hallucination. `null` disables it. Pause-heavy meeting
+  audio loses genuine content when this is set.
+
+`compute_type` accepts any CTranslate2 type. `int8` is the fastest; on Apple
+Silicon `int8_float32` or `float32` transcribe a weak microphone more
+accurately at some cost in speed.
 
 ## Doctor
 
@@ -177,6 +247,21 @@ presets, plus Stop, elapsed time, recordings folder and doctor. It queues
 transcription with the selected language/model and posts a macOS notification
 when the job completes.
 
+While a session is processed, the status item shows the current percentage and
+the menu contains a progress bar with the active phase: faster-whisper model
+loading, microphone transcription, system-audio transcription, pyannote
+loading, remote-speaker diarization, timeline merge and output generation.
+The diarization phase uses an animated indeterminate bar because pyannote does
+not expose a reliable numeric completion percentage.
+
+`./taprecord.sh build` and `./taprecord.sh install` rebuild an executable only
+when its Swift sources or embedded Info.plist changed. This avoids replacing an
+unchanged ad-hoc-signed binary and unnecessarily invalidating macOS privacy
+permission records. The build also applies explicit, stable bundle identifiers
+to the menu-bar application and terminal executable. The generated
+`MeetRec.app` is a standard macOS application bundle and can also be launched
+directly from Finder.
+
 ## Transcribe existing media
 
 The original file/folder workflow remains available:
@@ -192,7 +277,7 @@ Supported outputs now also include Markdown.
 
 ## Optional ASR benchmark for development
 
-TapRecord does **not** use FluidAudio or Parakeet during normal recording or
+MeetRec does **not** use FluidAudio or Parakeet during normal recording or
 transcription. Production sessions continue to use `faster-whisper`; FluidAudio
 is not installed by the standard requirements and is never invoked
 automatically.
@@ -248,7 +333,7 @@ policy and applicable law.
 
 The two-track recording architecture, recoverable session model, background
 transcription queue, menu-bar workflow and post-processing hook were inspired
-by [digimata/quill](https://github.com/digimata/quill). TapRecord retains its
+by [digimata/quill](https://github.com/digimata/quill). MeetRec retains its
 own implementation and combines those architectural ideas with its existing
 multilingual `faster-whisper` pipeline, optional pyannote diarization and
 multi-format transcript outputs.

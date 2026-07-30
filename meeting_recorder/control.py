@@ -26,6 +26,9 @@ from .sessions import (
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 RECORDER_BINARY = PROJECT_DIR / ".recorder"
+MENUBAR_BINARY = (
+    PROJECT_DIR / "MeetRec.app" / "Contents" / "MacOS" / "MeetRec"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +117,9 @@ def doctor(config_path: Path) -> int:
         ("Recorder binary", RECORDER_BINARY.is_file(), str(RECORDER_BINARY))
     )
     checks.append(
+        ("Menu bar binary", MENUBAR_BINARY.is_file(), str(MENUBAR_BINARY))
+    )
+    checks.append(
         (
             "faster-whisper",
             importlib.util.find_spec("faster_whisper") is not None,
@@ -148,24 +154,29 @@ def doctor(config_path: Path) -> int:
         )
     )
 
-    if RECORDER_BINARY.is_file():
+    for name, passed, detail in checks:
+        marker = "✓" if passed else "✗"
+        print(f"{marker} {name}: {detail}")
+
+    # Deliberately reported separately and excluded from the exit code: macOS
+    # attributes TCC grants to the responsible process, so probing the binary
+    # from here describes this terminal, not the menu-bar app. A failure would
+    # be a false negative.
+    if MENUBAR_BINARY.is_file():
         completed = subprocess.run(
-            [str(RECORDER_BINARY), "--doctor"],
+            [str(MENUBAR_BINARY), "--doctor"],
             check=False,
             capture_output=True,
             text=True,
         )
-        checks.append(
-            (
-                "macOS permissions",
-                completed.returncode == 0,
-                completed.stdout.strip() or completed.stderr.strip(),
-            )
+        detail = completed.stdout.strip() or completed.stderr.strip()
+        print(f"\nPermissions as seen by this terminal: {detail}")
+        print(
+            "This reflects the calling process, not MeetRec.app. Check the "
+            "real grants in System Settings → Privacy & Security → "
+            "Microphone and Screen & System Audio Recording."
         )
 
-    for name, passed, detail in checks:
-        marker = "✓" if passed else "✗"
-        print(f"{marker} {name}: {detail}")
     return 0 if all(item[1] for item in checks) else 1
 
 

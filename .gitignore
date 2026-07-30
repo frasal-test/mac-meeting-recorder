@@ -7,5 +7,7 @@ recordings/
 .DS_Store
 .recorder
 .taprecord-menu
+TapRecord.app/
+MeetRec.app/
 .watcher.log
 .menubar*.log

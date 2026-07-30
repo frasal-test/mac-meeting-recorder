@@ -18,6 +18,14 @@ class TranscriptionConfig:
     diarize_system: bool = True
     word_timestamps: bool = True
     max_attempts: int = 3
+    # faster-whisper's VAD discards segments it judges to be non-speech. On a
+    # quiet or intermittent microphone track it silently drops real speech, so
+    # it stays off unless a recording is noisy enough to need it.
+    vad_filter: bool = False
+    # Seconds of silence after which faster-whisper treats a segment as a
+    # hallucination and removes it. None disables the heuristic, which is the
+    # safe default for pause-heavy meeting audio.
+    hallucination_silence_threshold: float | None = None
 
 
 @dataclass
@@ -48,7 +56,20 @@ def _merge_transcription(raw: dict[str, Any]) -> TranscriptionConfig:
             1,
             int(raw.get("max_attempts", defaults.max_attempts)),
         ),
+        vad_filter=bool(raw.get("vad_filter", defaults.vad_filter)),
+        hallucination_silence_threshold=_optional_float(
+            raw.get(
+                "hallucination_silence_threshold",
+                defaults.hallucination_silence_threshold,
+            )
+        ),
     )
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def load_config(path: Path | None = None) -> AppConfig:

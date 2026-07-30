@@ -113,18 +113,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "input",
         type=Path,
-        help="Audio/video file or folder to watch for new recordings.",
+        help="Audio/video file or folder to transcribe.",
     )
     parser.add_argument(
         "-o",
         "--output-dir",
         type=Path,
         help="Where transcript files should be written. Defaults to <input>/transcripts for folders or next to the file.",
-    )
-    parser.add_argument(
-        "--watch",
-        action="store_true",
-        help="Keep watching a folder for new recordings.",
     )
     parser.add_argument(
         "--model",
@@ -165,26 +160,30 @@ def parse_args() -> argparse.Namespace:
         help="CPU threads for faster-whisper. 0 lets CTranslate2 choose.",
     )
     parser.add_argument(
-        "--poll-seconds",
-        type=float,
-        default=10,
-        help="Folder watch polling interval.",
-    )
-    parser.add_argument(
-        "--stable-seconds",
-        type=float,
-        default=20,
-        help="A file must be unchanged this long before transcription starts.",
-    )
-    parser.add_argument(
         "--word-timestamps",
         action="store_true",
         help="Include word-level timestamps in the JSON output.",
     )
     parser.add_argument(
+        "--vad",
+        dest="no_vad",
+        action="store_false",
+        help="Enable faster-whisper VAD filtering. Off by default because it "
+        "discards quiet or intermittent speech.",
+    )
+    parser.add_argument(
         "--no-vad",
+        dest="no_vad",
         action="store_true",
-        help="Disable faster-whisper VAD filtering.",
+        help="Disable faster-whisper VAD filtering (default).",
+    )
+    parser.set_defaults(no_vad=True)
+    parser.add_argument(
+        "--hallucination-silence-threshold",
+        type=float,
+        default=None,
+        help="Drop segments followed by this many seconds of silence. "
+        "Omit to disable the heuristic.",
     )
     parser.add_argument(
         "--force",
@@ -271,15 +270,6 @@ def iter_media_files(input_path: Path) -> Iterable[Path]:
     for path in sorted(input_path.iterdir()):
         if is_media_file(path):
             yield path
-
-
-def stable_enough(path: Path, stable_seconds: float) -> bool:
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return False
-    age = time.time() - max(stat.st_mtime, stat.st_ctime)
-    return age >= stable_seconds and stat.st_size > 0
 
 
 def format_timestamp(seconds: float, separator: str = ",") -> str:
@@ -565,8 +555,12 @@ def transcribe_source(
     source: Path,
     args: argparse.Namespace,
     diarization_base: Path | None = None,
+    progress_callback: Callable[[float], None] | None = None,
+    diarization_callback: Callable[[bool], None] | None = None,
 ) -> Transcript:
     print(f"Transcribing {source.name}...", flush=True)
+    if progress_callback is not None:
+        progress_callback(0.0)
     segments_iter, info = model.transcribe(
         str(source),
         beam_size=args.beam_size,
@@ -574,6 +568,9 @@ def transcribe_source(
         task=args.task,
         vad_filter=not args.no_vad,
         word_timestamps=args.word_timestamps,
+        hallucination_silence_threshold=getattr(
+            args, "hallucination_silence_threshold", None
+        ),
     )
 
     segments: list[TranscriptSegment] = []
@@ -581,6 +578,8 @@ def transcribe_source(
     for segment in segments_iter:
         pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
         print(f"  [{pct}] {segment.text.strip()}", flush=True)
+        if progress_callback is not None and duration:
+            progress_callback(min(1.0, segment.end / duration))
         words: list[Word] | None = None
         if args.word_timestamps and segment.words:
             words = [
@@ -600,17 +599,25 @@ def transcribe_source(
                 words=words,
             )
         )
+    if progress_callback is not None:
+        progress_callback(1.0)
 
     diarization_turns = None
     if diarizer is not None:
         if diarization_base is None:
             raise ValueError("diarization_base is required with a diarizer")
-        diarization_turns = run_diarization(
-            diarizer,
-            source,
-            diarization_base,
-            args,
-        )
+        if diarization_callback is not None:
+            diarization_callback(True)
+        try:
+            diarization_turns = run_diarization(
+                diarizer,
+                source,
+                diarization_base,
+                args,
+            )
+        finally:
+            if diarization_callback is not None:
+                diarization_callback(False)
     if diarization_turns:
         for segment in segments:
             segment.speaker = best_speaker_for_segment(segment, diarization_turns)
@@ -652,7 +659,7 @@ def transcribe_file(
         base.with_suffix(".json").name,
         base.with_suffix(".md").name,
     ]
-    if diarization_turns is not None:
+    if transcript.diarization is not None:
         write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
         written.append(base.with_suffix(".speakers.txt").name)
         written.append(base.with_suffix(".rttm").name)
@@ -794,41 +801,8 @@ def process_once(
         if not args.force and transcript_exists(output_dir, source, args.diarize):
             print(f"Skipping {source.name}; transcript already exists.", flush=True)
             continue
-        if input_path.is_dir() and not stable_enough(source, args.stable_seconds):
-            print(f"Skipping {source.name}; file is still changing.", flush=True)
-            continue
         transcribe_file(model, diarizer, source, output_dir, args)
     return 0
-
-
-def watch(
-    args: argparse.Namespace, model: "WhisperModel", diarizer: object | None
-) -> int:
-    input_path = args.input.expanduser().resolve()
-    if not input_path.is_dir():
-        print("--watch requires a folder input.", file=sys.stderr)
-        return 1
-
-    output_dir = output_dir_for(input_path, args.output_dir)
-    print(f"Watching {input_path}", flush=True)
-    print(f"Writing transcripts to {output_dir}", flush=True)
-
-    failed: set[Path] = set()
-    while True:
-        for source in iter_media_files(input_path):
-            if source in failed:
-                continue
-            if not args.force and transcript_exists(output_dir, source, args.diarize):
-                continue
-            if not stable_enough(source, args.stable_seconds):
-                continue
-            try:
-                transcribe_file(model, diarizer, source, output_dir, args)
-            except Exception as exc:
-                print(f"Error transcribing {source.name}: {exc}", file=sys.stderr, flush=True)
-                print(f"Skipping {source.name} for the rest of this session.", file=sys.stderr, flush=True)
-                failed.add(source)
-        time.sleep(args.poll_seconds)
 
 
 def main() -> int:
@@ -840,8 +814,6 @@ def main() -> int:
 
     model = load_model(args)
     diarizer = load_diarizer(args)
-    if args.watch:
-        return watch(args, model, diarizer)
     return process_once(args, model, diarizer)
 
 
