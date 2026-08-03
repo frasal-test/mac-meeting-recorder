@@ -174,8 +174,14 @@ final class MenuController: NSObject, @unchecked Sendable {
     }
 
     @objc private func startEnglish() {
+        // Deliberately the multilingual model, matching every other preset.
+        // Whisper's .en variants gain a fraction of a WER point on pure
+        // English and cannot transcribe another language at all, so picking
+        // one here turned "this meeting is in English" into "nothing said in
+        // Italian will survive" - which is exactly what happened to a call
+        // that switched language halfway through.
         startRecording(
-            preset: RecordingPreset(language: "en", model: "medium.en")
+            preset: RecordingPreset(language: "en", model: "medium")
         )
     }
 
