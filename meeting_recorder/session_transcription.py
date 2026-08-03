@@ -45,6 +45,9 @@ def transcription_args(config: AppConfig) -> argparse.Namespace:
         hallucination_silence_threshold=(
             settings.hallucination_silence_threshold
         ),
+        condition_on_previous_text=settings.condition_on_previous_text,
+        normalize_audio=settings.normalize_audio,
+        target_speech_dbfs=settings.target_speech_dbfs,
         diarize=settings.diarize_system,
         diarization_model="pyannote/speaker-diarization-3.1",
         hf_token=None,

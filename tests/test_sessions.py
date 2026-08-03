@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from meeting_recorder.cli import (
     DiarizationTurn,
+    SPEECH_GAIN_LIMITS_DB,
     Transcript,
     TranscriptSegment,
     Word,
     diarization_progress_hook,
+    gated_speech_gain_db,
+    transcribe_source,
     write_markdown,
 )
 from meeting_recorder.benchmark import word_error_counts
-from meeting_recorder.config import AppConfig, TranscriptionConfig
+from meeting_recorder.config import (
+    AppConfig,
+    TranscriptionConfig,
+    load_config,
+)
 from meeting_recorder.session_transcription import (
     merge_track_transcripts,
     transcription_args,
@@ -145,12 +154,20 @@ class SessionQueueTests(unittest.TestCase):
             [self.session, second],
         )
 
-    def test_session_pipeline_disables_speech_filters_by_default(self) -> None:
-        """VAD and the hallucination heuristic silently drop quiet microphone
-        speech, so the session pipeline must leave both off unless asked."""
+    def test_session_pipeline_defaults_to_speech_filters(self) -> None:
+        """Left unfiltered, Whisper fills a listener's silent microphone with
+        invented filler - one session produced 88 identical "Okay." segments.
+
+        The filters have to arrive with the leveling, never on their own: the
+        VAD judges absolute energy, so on a Bluetooth headset mic recorded
+        17 dB down it discarded 82% of the words its owner actually spoke.
+        Levelling first is what makes filtering safe, so these three defaults
+        belong together.
+        """
         args = transcription_args(AppConfig(recordings_dir=self.root))
-        self.assertTrue(args.no_vad)
-        self.assertIsNone(args.hallucination_silence_threshold)
+        self.assertFalse(args.no_vad)
+        self.assertEqual(args.hallucination_silence_threshold, 2.0)
+        self.assertTrue(args.normalize_audio)
 
     def test_session_pipeline_honours_configured_speech_filters(self) -> None:
         config = AppConfig(
@@ -294,6 +311,147 @@ class BenchmarkTests(unittest.TestCase):
                 "Testo senza speaker",
                 output.read_text(encoding="utf-8"),
             )
+
+
+def mean_square(rms: float) -> float:
+    return rms * rms
+
+
+class SpeechGainTests(unittest.TestCase):
+    def test_silence_is_excluded_from_the_measurement(self) -> None:
+        # A mic that recorded four minutes of silence around ten seconds of
+        # speech must be leveled by what the speech needs, not by an average
+        # the silence dominates.
+        speech = [mean_square(0.01)] * 25
+        silence = [mean_square(0.000001)] * 575
+
+        self.assertAlmostEqual(
+            gated_speech_gain_db(speech + silence, -20.0),
+            gated_speech_gain_db(speech, -20.0),
+            places=6,
+        )
+
+    def test_gain_lifts_quiet_speech_to_the_target(self) -> None:
+        # -40 dBFS speech needs +20 dB to reach a -20 dBFS target.
+        self.assertAlmostEqual(
+            gated_speech_gain_db([mean_square(0.01)] * 10, -20.0),
+            20.0,
+            places=6,
+        )
+
+    def test_loud_speech_is_attenuated(self) -> None:
+        self.assertLess(
+            gated_speech_gain_db([mean_square(0.5)] * 10, -20.0),
+            0.0,
+        )
+
+    def test_gain_is_clamped(self) -> None:
+        minimum, maximum = SPEECH_GAIN_LIMITS_DB
+        # Audible enough to clear the gate, quiet enough to ask for +34 dB.
+        self.assertEqual(
+            gated_speech_gain_db([mean_square(0.002)] * 10, -20.0),
+            maximum,
+        )
+        self.assertEqual(
+            gated_speech_gain_db([mean_square(1.0)] * 10, -90.0),
+            minimum,
+        )
+
+    def test_a_wholly_silent_track_is_left_alone(self) -> None:
+        self.assertEqual(gated_speech_gain_db([1e-12] * 100, -20.0), 0.0)
+        self.assertEqual(gated_speech_gain_db([], -20.0), 0.0)
+
+
+class RecordingModel:
+    """Stands in for WhisperModel, capturing the decode options."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict = {}
+
+    def transcribe(self, source: str, **kwargs):
+        self.kwargs = kwargs
+        info = SimpleNamespace(
+            duration=1.0,
+            language="en",
+            language_probability=1.0,
+        )
+        return iter(()), info
+
+
+def decode_options(**overrides) -> dict:
+    args = argparse.Namespace(
+        model="medium",
+        beam_size=5,
+        language=None,
+        task="transcribe",
+        word_timestamps=False,
+        no_vad=False,
+        hallucination_silence_threshold=2.0,
+        condition_on_previous_text=True,
+        # The leveling pass is exercised separately; it needs real audio.
+        normalize_audio=False,
+        target_speech_dbfs=-20.0,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    model = RecordingModel()
+    transcribe_source(model, None, Path("meeting.wav"), args)
+    return model.kwargs
+
+
+class DecodeOptionTests(unittest.TestCase):
+    def test_auto_detects_language_per_segment(self) -> None:
+        # 'auto' reaches transcribe_source as None, and only then should
+        # Whisper be free to switch language mid-call.
+        self.assertTrue(decode_options(language=None)["multilingual"])
+
+    def test_a_declared_language_stays_pinned(self) -> None:
+        for declared in ("en", "it", "es"):
+            with self.subTest(language=declared):
+                options = decode_options(language=declared)
+                self.assertFalse(options["multilingual"])
+                self.assertEqual(options["language"], declared)
+
+    def test_english_only_models_never_detect(self) -> None:
+        # meet.sh no longer picks an .en model, but one can still be asked for
+        # by hand, and it has no second language to find.
+        options = decode_options(language=None, model="medium.en")
+        self.assertFalse(options["multilingual"])
+
+    def test_zero_threshold_disables_the_heuristic(self) -> None:
+        # argparse cannot express None, so 0 is the off switch; passing it
+        # straight through would instead mean "every silence is suspect".
+        options = decode_options(hallucination_silence_threshold=0.0)
+        self.assertIsNone(options["hallucination_silence_threshold"])
+
+    def test_defaults_guard_against_hallucination(self) -> None:
+        options = decode_options()
+        self.assertTrue(options["vad_filter"])
+        self.assertEqual(options["hallucination_silence_threshold"], 2.0)
+        self.assertTrue(options["condition_on_previous_text"])
+
+
+class TranscriptionSettingsTests(unittest.TestCase):
+    def test_config_file_overrides_are_honoured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            write_json(
+                path,
+                {
+                    "transcription": {
+                        "condition_on_previous_text": False,
+                        "normalize_audio": False,
+                        "target_speech_dbfs": -16.5,
+                    }
+                },
+            )
+            settings = load_config(path).transcription
+            self.assertFalse(settings.condition_on_previous_text)
+            self.assertFalse(settings.normalize_audio)
+            self.assertEqual(settings.target_speech_dbfs, -16.5)
+            # Untouched keys keep the hardened defaults.
+            self.assertTrue(settings.vad_filter)
+            self.assertEqual(settings.hallucination_silence_threshold, 2.0)
 
 
 if __name__ == "__main__":

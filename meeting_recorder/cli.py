@@ -168,22 +168,44 @@ def parse_args() -> argparse.Namespace:
         "--vad",
         dest="no_vad",
         action="store_false",
-        help="Enable faster-whisper VAD filtering. Off by default because it "
-        "discards quiet or intermittent speech.",
+        help="Enable faster-whisper VAD filtering (default).",
     )
     parser.add_argument(
         "--no-vad",
         dest="no_vad",
         action="store_true",
-        help="Disable faster-whisper VAD filtering (default).",
+        help="Disable faster-whisper VAD filtering. Without it Whisper "
+        "invents filler over silent stretches.",
     )
-    parser.set_defaults(no_vad=True)
+    parser.set_defaults(no_vad=False)
     parser.add_argument(
         "--hallucination-silence-threshold",
         type=float,
-        default=None,
+        default=2.0,
         help="Drop segments followed by this many seconds of silence. "
-        "Omit to disable the heuristic.",
+        "Pass 0 to disable the heuristic.",
+    )
+    parser.add_argument(
+        "--no-condition-on-previous-text",
+        dest="condition_on_previous_text",
+        action="store_false",
+        help="Decode each window independently. Costs coherence, but breaks "
+        "a recording stuck repeating one phrase.",
+    )
+    parser.set_defaults(condition_on_previous_text=True)
+    parser.add_argument(
+        "--no-normalize-audio",
+        dest="normalize_audio",
+        action="store_false",
+        help="Skip speech leveling. Leaves a quiet microphone at the level "
+        "it was recorded, where the VAD may discard it.",
+    )
+    parser.set_defaults(normalize_audio=True)
+    parser.add_argument(
+        "--target-speech-dbfs",
+        type=float,
+        default=-20.0,
+        help="Level speech to this many dBFS before transcribing.",
     )
     parser.add_argument(
         "--force",
@@ -496,6 +518,135 @@ def prepare_diarization_audio(source: Path) -> Path:
     return wav_path
 
 
+TRANSCRIPTION_SAMPLE_RATE = 16000
+# Gate settings for gated_speech_gain_db, following EBU R128's two stages.
+SPEECH_BLOCK_SECONDS = 0.4
+SPEECH_ABSOLUTE_GATE_DBFS = -60.0
+SPEECH_RELATIVE_GATE_DB = 10.0
+SPEECH_GAIN_LIMITS_DB = (-20.0, 30.0)
+
+
+def decode_mono_speech(source: Path) -> Iterable:
+    """Yield the track as mono 16 kHz float32 blocks.
+
+    Resamples exactly as prepare_diarization_audio does, but hands the samples
+    back instead of writing them, so a caller can measure a track and then
+    rewrite it without holding an hour of audio in memory at once.
+    """
+    import av
+
+    resampler = av.AudioResampler(
+        format="flt",
+        layout="mono",
+        rate=TRANSCRIPTION_SAMPLE_RATE,
+    )
+    with av.open(str(source)) as container:
+        streams = [s for s in container.streams if s.type == "audio"]
+        if not streams:
+            raise ValueError(f"No audio stream found in {source}")
+        for frame in container.decode(audio=0):
+            for resampled in resampler.resample(frame):
+                yield resampled.to_ndarray().reshape(-1)
+        for resampled in resampler.resample(None):
+            yield resampled.to_ndarray().reshape(-1)
+
+
+def gated_speech_gain_db(
+    block_mean_squares: Iterable[float],
+    target_dbfs: float,
+) -> float:
+    """Gain in dB that lifts speech - not silence - to target_dbfs.
+
+    An average taken over a whole meeting microphone measures mostly silence:
+    79% of one session's mic track sat below -50 dBFS because its owner spent
+    the call listening. Normalising against that average would drive the noise
+    floor up by tens of dB and leave the speech no louder than before. EBU
+    R128 answers this with two gates, reproduced here: discard the near-silent
+    blocks, then discard whatever sits far below the level of what survived,
+    and measure only the remainder.
+    """
+    import math
+
+    absolute = 10.0 ** (SPEECH_ABSOLUTE_GATE_DBFS / 10.0)
+    audible = [value for value in block_mean_squares if value > absolute]
+    if not audible:
+        return 0.0
+    relative = (sum(audible) / len(audible)) * 10.0 ** (
+        -SPEECH_RELATIVE_GATE_DB / 10.0
+    )
+    speech = [value for value in audible if value > relative]
+    if not speech:
+        return 0.0
+    rms = math.sqrt(sum(speech) / len(speech))
+    if rms <= 0.0:
+        return 0.0
+    minimum, maximum = SPEECH_GAIN_LIMITS_DB
+    return max(minimum, min(maximum, target_dbfs - 20.0 * math.log10(rms)))
+
+
+def measure_speech_blocks(source: Path) -> list[float]:
+    import numpy as np
+
+    block = int(TRANSCRIPTION_SAMPLE_RATE * SPEECH_BLOCK_SECONDS)
+    squares: list[float] = []
+    carry = np.zeros(0, dtype=np.float32)
+    for chunk in decode_mono_speech(source):
+        carry = np.concatenate((carry, chunk))
+        usable = (carry.size // block) * block
+        if not usable:
+            continue
+        blocks = carry[:usable].astype(np.float64).reshape(-1, block)
+        squares.extend(np.square(blocks).mean(axis=1).tolist())
+        carry = carry[usable:]
+    if carry.size:
+        squares.append(float(np.square(carry.astype(np.float64)).mean()))
+    return squares
+
+
+def prepare_transcription_audio(
+    source: Path,
+    target_dbfs: float,
+) -> tuple[Path | None, float]:
+    """Rewrite the track at a consistent speech level.
+
+    Returns the temporary file and the gain applied, or (None, gain) when the
+    track already sits close enough that rewriting it would only cost time.
+    """
+    import numpy as np
+
+    gain_db = gated_speech_gain_db(measure_speech_blocks(source), target_dbfs)
+    if abs(gain_db) < 0.5:
+        return None, gain_db
+
+    factor = 10.0 ** (gain_db / 20.0)
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f"{source.stem}-leveled-",
+        suffix=".wav",
+        delete=False,
+    )
+    wav_path = Path(temp_file.name)
+    temp_file.close()
+
+    try:
+        with wave.open(str(wav_path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(TRANSCRIPTION_SAMPLE_RATE)
+            for chunk in decode_mono_speech(source):
+                # Clipping here can only catch the isolated transients the
+                # gate deliberately ignored: one mic track peaked at 0 dBFS on
+                # twenty samples of click while its speech sat 40 dB below.
+                # Holding the gain back for those would defeat the exercise.
+                scaled = np.clip(chunk * factor, -1.0, 1.0)
+                frames = np.rint(scaled * 32767.0).astype("<i2")
+                wav.writeframes(frames.tobytes())
+    except Exception:
+        wav_path.unlink(missing_ok=True)
+        raise
+
+    return wav_path, gain_db
+
+
 def run_with_elapsed_status(
     message: str,
     interval_seconds: float,
@@ -609,44 +760,74 @@ def transcribe_source(
     print(f"Transcribing {source.name}...", flush=True)
     if progress_callback is not None:
         progress_callback(0.0)
-    segments_iter, info = model.transcribe(
-        str(source),
-        beam_size=args.beam_size,
-        language=args.language,
-        task=args.task,
-        vad_filter=not args.no_vad,
-        word_timestamps=args.word_timestamps,
-        hallucination_silence_threshold=getattr(
-            args, "hallucination_silence_threshold", None
-        ),
-    )
+
+    leveled: Path | None = None
+    if getattr(args, "normalize_audio", False):
+        leveled, gain_db = prepare_transcription_audio(
+            source,
+            getattr(args, "target_speech_dbfs", -20.0),
+        )
+        if leveled is not None:
+            print(f"  Speech level adjusted {gain_db:+.1f} dB", flush=True)
 
     segments: list[TranscriptSegment] = []
-    duration: float = getattr(info, "duration", None) or 0.0
-    for segment in segments_iter:
-        pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
-        print(f"  [{pct}] {segment.text.strip()}", flush=True)
-        if progress_callback is not None and duration:
-            progress_callback(min(1.0, segment.end / duration))
-        words: list[Word] | None = None
-        if args.word_timestamps and segment.words:
-            words = [
-                Word(
-                    start=word.start,
-                    end=word.end,
-                    word=word.word,
-                    probability=getattr(word, "probability", None),
-                )
-                for word in segment.words
-            ]
-        segments.append(
-            TranscriptSegment(
-                start=segment.start,
-                end=segment.end,
-                text=segment.text,
-                words=words,
+    try:
+        # Decoding is lazy, so the leveled file has to outlive the loop below.
+        segments_iter, info = model.transcribe(
+            str(leveled or source),
+            beam_size=args.beam_size,
+            language=args.language,
+            task=args.task,
+            # Detecting per segment is only meaningful when no language was
+            # declared. 'auto' should follow a call that switches language
+            # halfway; an explicit --language it must stay pinned to Italian
+            # even when a few English sentences go by. An .en model has no
+            # other language to detect, so asking it to try only misleads.
+            multilingual=(
+                args.language is None
+                and not str(args.model).endswith(".en")
+            ),
+            condition_on_previous_text=getattr(
+                args, "condition_on_previous_text", True
+            ),
+            vad_filter=not args.no_vad,
+            word_timestamps=args.word_timestamps,
+            # 0 reads as "disabled" from the CLI; faster-whisper wants None.
+            hallucination_silence_threshold=getattr(
+                args, "hallucination_silence_threshold", None
             )
+            or None,
         )
+
+        duration: float = getattr(info, "duration", None) or 0.0
+        for segment in segments_iter:
+            pct = f"{segment.end / duration * 100:.0f}%" if duration else "…"
+            print(f"  [{pct}] {segment.text.strip()}", flush=True)
+            if progress_callback is not None and duration:
+                progress_callback(min(1.0, segment.end / duration))
+            words: list[Word] | None = None
+            if args.word_timestamps and segment.words:
+                words = [
+                    Word(
+                        start=word.start,
+                        end=word.end,
+                        word=word.word,
+                        probability=getattr(word, "probability", None),
+                    )
+                    for word in segment.words
+                ]
+            segments.append(
+                TranscriptSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=segment.text,
+                    words=words,
+                )
+            )
+    finally:
+        if leveled is not None:
+            leveled.unlink(missing_ok=True)
+
     if progress_callback is not None:
         progress_callback(1.0)
 

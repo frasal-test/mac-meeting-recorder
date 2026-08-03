@@ -30,8 +30,8 @@ recording core through a separate CLI executable.
 - `doctor` diagnostics.
 - Menu-bar daemon with recording timer, persistent transcription progress and
   LaunchAgent.
-- Speech filtering (VAD, silence-hallucination removal) available but off by
-  default, because both discard quiet microphone speech.
+- Speech leveling and filtering (VAD, silence-hallucination removal) on by
+  default, so a quiet microphone is neither invented over nor discarded.
 - Optional, development-only ASR benchmark harness.
 
 ## Requirements
@@ -198,23 +198,41 @@ transcript.
     "compute_type": "int8",
     "diarize_system": true,
     "max_attempts": 3,
-    "vad_filter": false,
-    "hallucination_silence_threshold": null
+    "vad_filter": true,
+    "hallucination_silence_threshold": 2.0,
+    "condition_on_previous_text": true,
+    "normalize_audio": true,
+    "target_speech_dbfs": -20.0
   }
 }
 ```
 
-### Speech filtering
+### Speech leveling and filtering
 
-Both filters are **off by default** and should normally stay that way.
+These four settings are **on by default and work as a set**. Whoever wears the
+microphone spends most of a meeting listening, and Whisper handed that silence
+decodes its own priors into filler — one hour-long session produced 88
+identical `Okay.` segments over stretches measuring -80 dBFS. Filtering alone
+is not the answer either: the VAD judges absolute energy, so on a Bluetooth
+headset mic recorded 17 dB below the system track it discarded 82% of the words
+its owner really spoke. Levelling first is what makes filtering safe.
 
-- `vad_filter` — faster-whisper's voice activity detection. It drops audio it
-  judges to be non-speech, which on a quiet or intermittent microphone track
-  silently removes real speech. Enable it only for a recording where noise is
-  the bigger problem.
+- `normalize_audio` — brings the speech in each track to `target_speech_dbfs`
+  before decoding. The measurement is gated: near-silent blocks are excluded,
+  so a track that is 79% silence is leveled by what its speech needs rather
+  than by an average the silence dominates.
+- `target_speech_dbfs` — where leveled speech should land. `-20.0` suits
+  speech; peaks are allowed to clip, since a gated measurement deliberately
+  ignores the isolated transients that reach full scale.
+- `vad_filter` — faster-whisper's voice activity detection, which keeps the
+  decoder away from silence. Turn it off only for a recording you would rather
+  over-transcribe than lose.
 - `hallucination_silence_threshold` — seconds of silence after which a segment
-  is discarded as a hallucination. `null` disables it. Pause-heavy meeting
-  audio loses genuine content when this is set.
+  is discarded as a hallucination, as a backstop to the VAD. `null` disables it.
+- `condition_on_previous_text` — each window is decoded conditioned on the
+  previous one. That keeps a conversation coherent, but also lets one
+  hallucination seed the next window: set it to `false` to break a recording
+  stuck repeating a phrase or emitting segments minutes long.
 
 `compute_type` accepts any CTranslate2 type. `int8` is the fastest; on Apple
 Silicon `int8_float32` or `float32` transcribe a weak microphone more

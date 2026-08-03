@@ -40,11 +40,13 @@ fi
 # ad-hoc signature. Re-signing on every run would reset the TCC grants.
 "$SCRIPT_DIR/taprecord.sh" build-recorder
 
-if [[ "$MEETING_LANG" == "en" ]]; then
-    MODEL="${WHISPER_MODEL:-medium.en}"
-else
-    MODEL="${WHISPER_MODEL:-medium}"
-fi
+# Always the multilingual model. Whisper's .en variants are marginally better
+# on pure English and cannot transcribe anything else at all - nor even run
+# language detection - so picking one turns "this meeting is in English" into
+# "no other language will be recoverable, whatever happens in the room". A
+# call that switches to Italian halfway is worth more than a fraction of a
+# WER point.
+MODEL="${WHISPER_MODEL:-medium}"
 
 TIMESTAMP="$(date '+%Y-%m-%dT%H-%M-%S')"
 SESSION_DIR="$RECORDINGS_DIR/$TIMESTAMP"

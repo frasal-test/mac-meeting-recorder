@@ -9,7 +9,10 @@
     "diarize_system": true,
     "word_timestamps": true,
     "max_attempts": 3,
-    "vad_filter": false,
-    "hallucination_silence_threshold": null
+    "vad_filter": true,
+    "hallucination_silence_threshold": 2.0,
+    "condition_on_previous_text": true,
+    "normalize_audio": true,
+    "target_speech_dbfs": -20.0
   }
 }

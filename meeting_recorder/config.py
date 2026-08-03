@@ -18,14 +18,27 @@ class TranscriptionConfig:
     diarize_system: bool = True
     word_timestamps: bool = True
     max_attempts: int = 3
-    # faster-whisper's VAD discards segments it judges to be non-speech. On a
-    # quiet or intermittent microphone track it silently drops real speech, so
-    # it stays off unless a recording is noisy enough to need it.
-    vad_filter: bool = False
+    # A meeting microphone is silent most of the time — the person wearing it
+    # spends the call listening. Fed that silence, Whisper decodes its own
+    # priors instead of nothing and emits filler: one session produced 88
+    # identical "Okay." segments over stretches measuring -80 dBFS. The VAD
+    # keeps the decoder away from those stretches, so it stays on.
+    vad_filter: bool = True
     # Seconds of silence after which faster-whisper treats a segment as a
-    # hallucination and removes it. None disables the heuristic, which is the
-    # safe default for pause-heavy meeting audio.
-    hallucination_silence_threshold: float | None = None
+    # hallucination and removes it. Backstop for whatever the VAD lets pass.
+    hallucination_silence_threshold: float | None = 2.0
+    # Each window is decoded conditioned on the previous one, which keeps the
+    # text coherent across a conversation but also lets a single hallucination
+    # seed the next window and lock the decoder into a repetition loop. Turn
+    # off to break a recording that repeats one phrase.
+    condition_on_previous_text: bool = True
+    # Bring the speech in every track to a common loudness before decoding. A
+    # Bluetooth headset mic records far quieter than the system track — 17 dB
+    # apart in one session — and the gap costs accuracy on the quiet side.
+    normalize_audio: bool = True
+    # Target level for speech, measured over speech alone. See
+    # gated_speech_gain_db for why the silence has to be excluded.
+    target_speech_dbfs: float = -20.0
 
 
 @dataclass
@@ -62,6 +75,18 @@ def _merge_transcription(raw: dict[str, Any]) -> TranscriptionConfig:
                 "hallucination_silence_threshold",
                 defaults.hallucination_silence_threshold,
             )
+        ),
+        condition_on_previous_text=bool(
+            raw.get(
+                "condition_on_previous_text",
+                defaults.condition_on_previous_text,
+            )
+        ),
+        normalize_audio=bool(
+            raw.get("normalize_audio", defaults.normalize_audio)
+        ),
+        target_speech_dbfs=float(
+            raw.get("target_speech_dbfs", defaults.target_speech_dbfs)
         ),
     )
 
