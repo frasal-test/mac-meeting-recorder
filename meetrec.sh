@@ -13,6 +13,10 @@ LABEL="com.frasal.meetrec"
 # Microphone and Screen Recording grants to the exact build and re-prompts
 # after every recompile. Create it once — see "Stable signing" in the README.
 SIGN_IDENTITY="${MEETREC_SIGN_IDENTITY:-MeetRec Dev}"
+# Every path here derives from SCRIPT_DIR, so the script runs from anywhere —
+# except that `python -m meeting_recorder.…` resolves the package against the
+# working directory. Put the project on the path explicitly instead.
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 needs_build() {
     local output="$1"
