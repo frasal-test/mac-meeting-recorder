@@ -6,9 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from meeting_recorder.transcription import (
     DiarizationTurn,
+    DiarizationUnavailable,
     SPEECH_GAIN_LIMITS_DB,
     Transcript,
     TranscriptSegment,
@@ -17,6 +19,9 @@ from meeting_recorder.transcription import (
     gated_speech_gain_db,
     transcribe_source,
     write_markdown,
+    write_speaker_txt,
+    write_srt,
+    write_txt,
 )
 from meeting_recorder.config import (
     AppConfig,
@@ -24,6 +29,7 @@ from meeting_recorder.config import (
     load_config,
 )
 from meeting_recorder.session_transcription import (
+    SessionProcessor,
     merge_track_transcripts,
     transcription_args,
 )
@@ -295,6 +301,98 @@ class MarkdownOutputTests(unittest.TestCase):
             self.assertIn(
                 "Testo senza speaker",
                 output.read_text(encoding="utf-8"),
+            )
+
+
+class DegradedDiarizationTests(unittest.TestCase):
+    """A recording is worth more than the speaker labels put on it.
+
+    pyannote being absent, or a token being refused, is settled: three
+    attempts decide it no differently than one, and failing the job discards
+    an hour of speech that transcribed perfectly well. The transcript is
+    written without speaker separation instead - and says so where someone
+    will actually read it, which is the transcript and not the log.
+    """
+
+    def processor(self) -> SessionProcessor:
+        return SessionProcessor(
+            AppConfig(recordings_dir=Path("/tmp")),
+            {"diarize_system": True},
+        )
+
+    def test_missing_pyannote_degrades_with_a_warning(self) -> None:
+        processor = self.processor()
+        with mock.patch(
+            "meeting_recorder.session_transcription.load_diarizer",
+            side_effect=DiarizationUnavailable(
+                "pyannote.audio is not installed; install "
+                "requirements-diarization.txt to enable it."
+            ),
+        ):
+            self.assertIsNone(processor.diarizer())
+
+        self.assertEqual(len(processor.warnings), 1)
+        self.assertIn("pyannote.audio is not installed", processor.warnings[0])
+        self.assertIn("labelled REMOTE", processor.warnings[0])
+
+    def test_an_unexpected_failure_still_fails_the_job(self) -> None:
+        # A dropped connection is the case retrying exists for. Degrading here
+        # would quietly hand back a worse transcript than a retry would.
+        processor = self.processor()
+        with mock.patch(
+            "meeting_recorder.session_transcription.load_diarizer",
+            side_effect=OSError("connection reset"),
+        ):
+            with self.assertRaises(OSError):
+                processor.diarizer()
+
+        self.assertEqual(processor.warnings, [])
+
+    def test_the_warning_reaches_every_readable_output(self) -> None:
+        warning = "Speaker separation was skipped. Everyone is REMOTE."
+        transcript = Transcript(
+            source="session",
+            model="medium",
+            language="it",
+            language_probability=1,
+            duration=1,
+            segments=[TranscriptSegment(0, 1, "Buongiorno", speaker="ME")],
+            warnings=[warning],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary) / "transcript"
+            write_markdown(base.with_suffix(".md"), transcript)
+            write_txt(base.with_suffix(".txt"), transcript)
+            write_speaker_txt(base.with_suffix(".speakers.txt"), transcript)
+            write_srt(base.with_suffix(".srt"), transcript)
+
+            for suffix in (".md", ".txt", ".speakers.txt"):
+                written = base.with_suffix(suffix).read_text(encoding="utf-8")
+                self.assertIn(warning, written)
+                self.assertIn("Buongiorno", written)
+
+            # Not the subtitles: there the warning would play over the video as
+            # the first thing anyone hears said.
+            self.assertNotIn(
+                warning,
+                base.with_suffix(".srt").read_text(encoding="utf-8"),
+            )
+
+    def test_a_clean_run_adds_nothing(self) -> None:
+        transcript = Transcript(
+            source="session",
+            model="medium",
+            language="it",
+            language_probability=1,
+            duration=1,
+            segments=[TranscriptSegment(0, 1, "Buongiorno", speaker="ME")],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "transcript.txt"
+            write_txt(output, transcript)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                "Buongiorno\n",
             )
 
 

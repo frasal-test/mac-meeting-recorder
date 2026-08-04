@@ -15,6 +15,7 @@ from .sessions import (
 )
 from .transcription import (
     DiarizationTurn,
+    DiarizationUnavailable,
     Transcript,
     TranscriptSegment,
     Word,
@@ -109,6 +110,7 @@ def merge_track_transcripts(
     mic: Transcript | None,
     system: Transcript | None,
     model: str,
+    warnings: list[str] | None = None,
 ) -> Transcript:
     offsets = meta.get("trackStartOffsets")
     if not isinstance(offsets, dict):
@@ -176,6 +178,7 @@ def merge_track_transcripts(
         duration=max(duration, inferred_duration),
         segments=segments,
         diarization=turns or None,
+        warnings=list(warnings) if warnings else None,
     )
 
 
@@ -199,6 +202,7 @@ class SessionProcessor:
         self._model: object | None = None
         self._diarizer: object | None = None
         self._diarizer_loaded = False
+        self.warnings: list[str] = []
 
     @property
     def model(self) -> object:
@@ -212,7 +216,17 @@ class SessionProcessor:
 
     def diarizer(self) -> object | None:
         if not self._diarizer_loaded:
-            self._diarizer = load_diarizer(self.args)
+            try:
+                self._diarizer = load_diarizer(self.args)
+            except DiarizationUnavailable as exc:
+                # The recording is worth more than the labels put on it.
+                # Failing here would spend all three attempts and then throw
+                # away an hour of speech over a package that is still missing.
+                self._diarizer = None
+                self.warnings.append(
+                    f"Speaker separation was skipped. {exc} Remote "
+                    "participants are all labelled REMOTE."
+                )
             self._diarizer_loaded = True
         return self._diarizer
 
@@ -320,12 +334,15 @@ class SessionProcessor:
             fraction=0.90,
             detail="Merging microphone and system timelines",
         )
+        for warning in self.warnings:
+            append_log(session_dir, warning)
         transcript = merge_track_transcripts(
             session_dir=session_dir,
             meta=meta,
             mic=mic,
             system=system,
             model=self.args.model,
+            warnings=self.warnings,
         )
         update_job_progress(
             session_dir,

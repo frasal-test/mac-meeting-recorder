@@ -85,6 +85,14 @@ class Transcript:
     duration: float | None
     segments: list[TranscriptSegment]
     diarization: list[DiarizationTurn] | None = None
+    # Carried into the human-readable outputs, not just the log: a transcript
+    # produced with a degraded pipeline has to say so where it will actually be
+    # read, which is the transcript itself.
+    warnings: list[str] | None = None
+
+
+class DiarizationUnavailable(RuntimeError):
+    """Speaker separation cannot run, and retrying will not change that."""
 
 
 def format_timestamp(seconds: float, separator: str = ",") -> str:
@@ -98,8 +106,15 @@ def format_timestamp(seconds: float, separator: str = ",") -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
 
 
+def warning_lines(transcript: Transcript, prefix: str) -> list[str]:
+    return [f"{prefix}{warning}" for warning in transcript.warnings or []]
+
+
 def write_txt(path: Path, transcript: Transcript) -> None:
     text = "\n".join(segment.text.strip() for segment in transcript.segments).strip()
+    header = warning_lines(transcript, "[MeetRec] ")
+    if header:
+        text = "\n".join(header) + "\n\n" + text
     path.write_text(text + "\n", encoding="utf-8")
 
 
@@ -144,7 +159,11 @@ def write_speaker_txt(path: Path, transcript: Transcript) -> None:
             current_end = segment.end
 
     flush()
-    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    body = "\n".join(lines).strip()
+    header = warning_lines(transcript, "[MeetRec] ")
+    if header:
+        body = "\n".join(header) + "\n\n" + body
+    path.write_text(body + "\n", encoding="utf-8")
 
 
 def write_json(path: Path, transcript: Transcript) -> None:
@@ -162,6 +181,8 @@ def write_markdown(path: Path, transcript: Transcript) -> None:
         lines.append(f"- Language: `{transcript.language}`")
     if transcript.duration is not None:
         lines.append(f"- Duration: `{format_timestamp(transcript.duration, '.')}`")
+    for warning in warning_lines(transcript, "> **Warning:** "):
+        lines.extend(["", warning])
     lines.extend(["", "## Conversation", ""])
 
     current_speaker: str | None = None
@@ -742,14 +763,18 @@ def load_diarizer(args: argparse.Namespace) -> object | None:
     if not args.diarize:
         return None
 
+    # Both failures below are settled: the package is absent, or the token is
+    # not allowed near the model. Retrying decides nothing, so they are raised
+    # apart from the rest and let the caller finish without speaker labels.
+    # Anything else — a dropped connection, an exhausted disk — still escapes,
+    # because there the retry is the whole point.
     try:
         from pyannote.audio import Pipeline
-    except ImportError:
-        print(
-            "pyannote.audio is not installed. Install requirements-diarization.txt to use --diarize.",
-            file=sys.stderr,
-        )
-        raise
+    except ImportError as exc:
+        raise DiarizationUnavailable(
+            "pyannote.audio is not installed; install "
+            "requirements-diarization.txt to enable it."
+        ) from exc
 
     token = args.hf_token or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
 
@@ -758,7 +783,10 @@ def load_diarizer(args: argparse.Namespace) -> object | None:
     except Exception as exc:
         if is_huggingface_access_error(exc):
             print_diarization_access_help(args.diarization_model, exc)
-            raise SystemExit(2)
+            raise DiarizationUnavailable(
+                f"the Hugging Face token cannot access {args.diarization_model}; "
+                "check HF_TOKEN in .env and accept the model conditions."
+            ) from exc
         raise
 
     import torch
