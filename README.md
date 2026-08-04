@@ -1,6 +1,65 @@
 # MeetRec
 
-Local-first macOS meeting recorder and transcription pipeline.
+Local-first macOS meeting recorder and transcription pipeline. It records your
+microphone and the other participants into two separate tracks and transcribes
+them on your Mac. Audio and transcripts never leave the machine.
+
+## Quickstart
+
+macOS 13 or later. About 20 minutes, and roughly 3 GB of downloads.
+
+```bash
+git clone https://github.com/frasal-test/meetrec.git
+cd meetrec
+xcode-select --install    # skip if `swiftc --version` already prints a version
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-diarization.txt
+```
+
+`diarize_system` is **on by default**, so `requirements-diarization.txt` is the
+file that matches the shipped configuration. Installing `requirements.txt`
+alone still transcribes — the session is written without speaker separation and
+carries a warning saying so — but to make that the deliberate choice, set
+`"diarize_system": false` in the [config file](#configuration-and-hook).
+
+Separating remote speakers needs a Hugging Face **read** token. Sign in, accept
+the model conditions on both
+[segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) and
+[speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1),
+then write the token to `.env` in the project root:
+
+```bash
+echo 'HF_TOKEN=hf_your_token_here' > .env
+```
+
+In **Keychain Access**, create a self-signed certificate named `MeetRec Dev`
+(*Certificate Assistant → Create a Certificate*, Identity Type **Self Signed
+Root**, Certificate Type **Code Signing**). Without it macOS re-asks for
+microphone and screen-recording permission after every rebuild — see
+[Stable signing](#stable-signing). Then build and install:
+
+```bash
+./meetrec.sh install
+```
+
+A ✒︎ icon appears in the menu bar. Start a recording from it and grant
+**Microphone** and **Screen & System Audio Recording** when macOS asks, restart
+MeetRec so the screen grant takes effect, and check the result:
+
+```bash
+./meetrec.sh doctor
+```
+
+Wear headphones — otherwise your microphone picks up the other participants
+through the speakers and they are transcribed twice. The first transcription
+downloads the `medium` model (1.4 GB) before producing anything; transcripts
+land in `recordings/<timestamp>/transcripts/`.
+
+**New to the terminal, or something above did not work?**
+[INSTALL.md](INSTALL.md) walks through the same steps one at a time, with what
+each one should print and how to fix it when it does not.
+
+## How it works
 
 MeetRec records microphone and system audio into **two persistent tracks**,
 transcribes them locally with `faster-whisper`, and merges both timelines using
@@ -38,33 +97,21 @@ recording core through a separate CLI executable.
 - macOS 13 or later
 - Xcode Command Line Tools
 - Python 3.9+
+- A Hugging Face read token, for remote-speaker diarization only
 - Headphones recommended
 
-Create the Python environment:
+`requirements.txt` installs the transcription engine alone;
+`requirements-diarization.txt` adds pyannote and PyTorch for remote-speaker
+separation. Since `diarize_system` defaults to `true`, the second file is the
+one that matches the default configuration.
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
+The [Quickstart](#quickstart) has the commands; [INSTALL.md](INSTALL.md) has the
+same sequence with verification and failure modes for each step.
 
-For remote-speaker diarization:
-
-```bash
-.venv/bin/pip install -r requirements-diarization.txt
-```
-
-Add `HF_TOKEN=hf_...` to `.env` and accept the model conditions for:
-
-- <https://huggingface.co/pyannote/segmentation-3.0>
-- <https://huggingface.co/pyannote/speaker-diarization-3.1>
-
-On first menu-bar recording, grant **MeetRec** access to:
-
-- Screen & System Audio Recording
-- Microphone
-
-For terminal-only use, grant the separately listed **MeetRec Recorder**
-process; macOS may also attribute the request to Terminal.
+On first menu-bar recording, grant **MeetRec** access to Screen & System Audio
+Recording and to the Microphone. For terminal-only use, grant the separately
+listed **MeetRec Recorder** process; macOS may also attribute the request to
+Terminal.
 
 ### Stable signing
 
@@ -96,7 +143,9 @@ Signing** to *Always Trust*.
 Builds pick it up automatically. Override the name with `MEETREC_SIGN_IDENTITY`
 if you prefer a different one.
 
-Then clear the stale grants so the next launch registers cleanly:
+If MeetRec had already run ad-hoc signed, clear the grants it left behind so the
+next launch registers cleanly. On a fresh install there is nothing to reset and
+these two commands can be skipped:
 
 ```bash
 tccutil reset ScreenCapture com.frasal.meetrec.menubar
@@ -171,6 +220,15 @@ speaker and source track. Word timestamps are shifted by the same track offset.
 # Process the pending queue
 .venv/bin/python -m meeting_recorder.control worker --once
 ```
+
+When speaker separation cannot run at all — pyannote is not installed, or the
+Hugging Face token is refused — the session is still transcribed, without
+speaker separation and with every remote participant labelled `REMOTE`. Neither
+cause changes on a retry, and a valid recording is worth more than the labels
+put on it. The reason is recorded in `transcript.json` under `warnings` and
+printed at the top of the readable transcripts, so it is visible to whoever
+opens the meeting rather than only to whoever reads the log. Any other failure
+still fails the job and retries, because there a retry is the point.
 
 Only one worker processes sessions at a time. Every worker pass scans the entire
 pending queue, including sessions left by an earlier failure. The menu-bar app
