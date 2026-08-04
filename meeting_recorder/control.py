@@ -12,8 +12,8 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from .cli import load_env_files
 from .config import CONFIG_PATH, load_config
+from .transcription import load_env_files
 from .session_transcription import SessionProcessor
 from .sessions import (
     enqueue_session,
@@ -33,7 +33,7 @@ MENUBAR_BINARY = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="taprecord",
+        prog="meetrec",
         description="Manage recording sessions and transcription jobs.",
     )
     parser.add_argument(

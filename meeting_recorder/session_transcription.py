@@ -5,7 +5,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .cli import (
+from .config import AppConfig
+from .sessions import (
+    append_log,
+    read_json,
+    run_on_stop,
+    track_paths,
+    update_job_progress,
+)
+from .transcription import (
     DiarizationTurn,
     Transcript,
     TranscriptSegment,
@@ -19,14 +27,6 @@ from .cli import (
     write_speaker_txt,
     write_srt,
     write_txt,
-)
-from .config import AppConfig
-from .sessions import (
-    append_log,
-    read_json,
-    run_on_stop,
-    track_paths,
-    update_job_progress,
 )
 
 

@@ -319,9 +319,9 @@ def pending_sessions(
 
 def run_on_stop(command: str, session_dir: Path) -> None:
     environment = os.environ.copy()
-    environment["TAPRECORD_SESSION_DIR"] = str(session_dir)
+    environment["MEETREC_SESSION_DIR"] = str(session_dir)
     completed = subprocess.run(
-        ["/bin/zsh", "-lc", f'{command} "$1"', "taprecord-on-stop", str(session_dir)],
+        ["/bin/zsh", "-lc", f'{command} "$1"', "meetrec-on-stop", str(session_dir)],
         cwd=session_dir,
         env=environment,
         check=False,

@@ -227,7 +227,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             self,
             type: .audio,
             sampleHandlerQueue: DispatchQueue(
-                label: "taprecord.system-audio"
+                label: "meetrec.system-audio"
             )
         )
         try await captureStream.startCapture()

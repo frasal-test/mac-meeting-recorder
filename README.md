@@ -32,7 +32,6 @@ recording core through a separate CLI executable.
   LaunchAgent.
 - Speech leveling and filtering (VAD, silence-hallucination removal) on by
   default, so a quiet microphone is neither invented over nor discarded.
-- Optional, development-only ASR benchmark harness.
 
 ## Requirements
 
@@ -181,12 +180,12 @@ retryable on subsequent passes until `max_attempts` is reached.
 
 ## Configuration and hook
 
-The optional config file is `~/.config/taprecord/config.json`. Start from
+The optional config file is `~/.config/meetrec/config.json`. Start from
 [`config.example.json`](config.example.json).
 
 `on_stop` is executed after all transcript files have been written. The session
 directory is available both as the first positional argument and as
-`TAPRECORD_SESSION_DIR`. A failed hook is logged but does not invalidate a valid
+`MEETREC_SESSION_DIR`. A failed hook is logged but does not invalidate a valid
 transcript.
 
 ```json
@@ -241,7 +240,7 @@ accurately at some cost in speed.
 ## Doctor
 
 ```bash
-./taprecord.sh doctor
+./meetrec.sh doctor
 ```
 
 It checks macOS, the Swift build, Python models, Hugging Face configuration,
@@ -251,13 +250,13 @@ recordings directory and macOS recording permissions.
 
 ```bash
 # Build and run in the foreground
-./taprecord.sh run
+./meetrec.sh run
 
 # Build, install a LaunchAgent and start it
-./taprecord.sh install
+./meetrec.sh install
 
 # Disable the LaunchAgent; its plist is preserved as .disabled
-./taprecord.sh uninstall
+./meetrec.sh uninstall
 ```
 
 The menu bar offers Italian, English, Spanish and automatic-language recording
@@ -272,72 +271,13 @@ loading, remote-speaker diarization, timeline merge and output generation.
 The diarization phase uses an animated indeterminate bar because pyannote does
 not expose a reliable numeric completion percentage.
 
-`./taprecord.sh build` and `./taprecord.sh install` rebuild an executable only
+`./meetrec.sh build` and `./meetrec.sh install` rebuild an executable only
 when its Swift sources or embedded Info.plist changed. This avoids replacing an
 unchanged ad-hoc-signed binary and unnecessarily invalidating macOS privacy
 permission records. The build also applies explicit, stable bundle identifiers
 to the menu-bar application and terminal executable. The generated
 `MeetRec.app` is a standard macOS application bundle and can also be launched
 directly from Finder.
-
-## Transcribe existing media
-
-The original file/folder workflow remains available:
-
-```bash
-.venv/bin/python -m meeting_recorder.cli recording.m4a \
-  --model medium \
-  --language it \
-  --diarize
-```
-
-Supported outputs now also include Markdown.
-
-## Optional ASR benchmark for development
-
-MeetRec does **not** use FluidAudio or Parakeet during normal recording or
-transcription. Production sessions continue to use `faster-whisper`; FluidAudio
-is not installed by the standard requirements and is never invoked
-automatically.
-
-The separate benchmark command exists only to compare experimental ASR engines
-on representative audio before considering any future change. It can measure
-WER and processing speed for `faster-whisper`, FluidAudio/Parakeet or
-pre-generated transcripts.
-
-Run faster-whisper:
-
-```bash
-.venv/bin/python -m meeting_recorder.benchmark whisper sample.caf \
-  --reference reference.txt \
-  --model medium \
-  --language it \
-  --output benchmark/whisper.md
-```
-
-Run FluidAudio from a local FluidAudio checkout:
-
-```bash
-.venv/bin/python -m meeting_recorder.benchmark fluidaudio sample.caf \
-  --reference reference.txt \
-  --fluidaudio-dir /path/to/FluidAudio \
-  --model-version v3 \
-  --output benchmark/parakeet-v3.md
-```
-
-Evaluate pre-generated transcripts:
-
-```bash
-.venv/bin/python -m meeting_recorder.benchmark evaluate \
-  --reference reference.txt \
-  --candidate whisper=whisper.txt \
-  --candidate parakeet=parakeet.txt \
-  --output benchmark/comparison.md
-```
-
-The report records WER, elapsed time and real-time factor. At least three
-representative samples are recommended: Italian presales vocabulary, English,
-and a mixed-language meeting.
 
 ## Privacy and legal note
 

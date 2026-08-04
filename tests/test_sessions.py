@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from meeting_recorder.cli import (
+from meeting_recorder.transcription import (
     DiarizationTurn,
     SPEECH_GAIN_LIMITS_DB,
     Transcript,
@@ -18,7 +18,6 @@ from meeting_recorder.cli import (
     transcribe_source,
     write_markdown,
 )
-from meeting_recorder.benchmark import word_error_counts
 from meeting_recorder.config import (
     AppConfig,
     TranscriptionConfig,
@@ -278,21 +277,7 @@ class TrackMergeTests(unittest.TestCase):
         self.assertEqual(merged.duration, 4)
 
 
-class BenchmarkTests(unittest.TestCase):
-    def test_word_error_counts_normalizes_case_and_punctuation(self) -> None:
-        errors, words = word_error_counts(
-            "Ciao, MONDO!",
-            "ciao mondo",
-        )
-        self.assertEqual((errors, words), (0, 2))
-
-    def test_word_error_counts_handles_substitution(self) -> None:
-        errors, words = word_error_counts(
-            "uno due tre",
-            "uno quattro tre",
-        )
-        self.assertEqual((errors, words), (1, 3))
-
+class MarkdownOutputTests(unittest.TestCase):
     def test_markdown_keeps_unlabelled_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "transcript.md"

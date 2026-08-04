@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-CONFIG_PATH = Path("~/.config/taprecord/config.json").expanduser()
+CONFIG_PATH = Path("~/.config/meetrec/config.json").expanduser()
 
 
 @dataclass

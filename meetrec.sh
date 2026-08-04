@@ -8,8 +8,6 @@ MENUBAR="$MENUBAR_APP/Contents/MacOS/MeetRec"
 MENUBAR_INFO="$MENUBAR_APP/Contents/Info.plist"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.frasal.meetrec.plist"
 LABEL="com.frasal.meetrec"
-LEGACY_LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.frasal.taprecord.plist"
-LEGACY_LABEL="com.frasal.taprecord"
 # A self-signed code-signing certificate keeps the designated requirement tied
 # to an identity instead of the binary's cdhash. Without one macOS pins the
 # Microphone and Screen Recording grants to the exact build and re-prompts
@@ -111,15 +109,6 @@ install_agent() {
         --label "$LABEL" \
         --program "$MENUBAR" \
         --project "$SCRIPT_DIR"
-    launchctl bootout "gui/$(id -u)/$LEGACY_LABEL" 2>/dev/null || true
-    if [[ -f "$LEGACY_LAUNCH_AGENT" ]]; then
-        legacy_disabled="$LEGACY_LAUNCH_AGENT.disabled"
-        if [[ -e "$legacy_disabled" ]]; then
-            legacy_disabled="$LEGACY_LAUNCH_AGENT.disabled.$(date +%s)"
-        fi
-        mv "$LEGACY_LAUNCH_AGENT" "$legacy_disabled"
-        echo "Legacy LaunchAgent disabled: $legacy_disabled"
-    fi
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
     echo "MeetRec is installed and running in the menu bar."

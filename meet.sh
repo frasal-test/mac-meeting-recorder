@@ -36,9 +36,9 @@ if [[ -n "$NUM_SPEAKERS" && ! "$NUM_SPEAKERS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-# taprecord.sh owns the build rules, including the staleness check and the
+# meetrec.sh owns the build rules, including the staleness check and the
 # ad-hoc signature. Re-signing on every run would reset the TCC grants.
-"$SCRIPT_DIR/taprecord.sh" build-recorder
+"$SCRIPT_DIR/meetrec.sh" build-recorder
 
 # Always the multilingual model. Whisper's .en variants are marginally better
 # on pure English and cannot transcribe anything else at all - nor even run
@@ -66,7 +66,7 @@ if [[ ! -s "$SESSION_DIR/audio/mic.caf" && ! -s "$SESSION_DIR/audio/system.caf" 
 fi
 
 CONTROL_ARGS=(
-    --config "${TAPRECORD_CONFIG:-$HOME/.config/taprecord/config.json}"
+    --config "${MEETREC_CONFIG:-$HOME/.config/meetrec/config.json}"
     enqueue "$SESSION_DIR"
     --model "$MODEL"
     --language "$MEETING_LANG"
@@ -85,12 +85,12 @@ fi
 echo ""
 if [[ "$WAIT_FOR_TRANSCRIPT" == "1" ]]; then
     "$VENV_PYTHON" -m meeting_recorder.control \
-        --config "${TAPRECORD_CONFIG:-$HOME/.config/taprecord/config.json}" \
+        --config "${MEETREC_CONFIG:-$HOME/.config/meetrec/config.json}" \
         worker --once
     echo "  ✓ Trascrizione completata: $SESSION_DIR/transcripts/transcript.md"
 else
     nohup "$VENV_PYTHON" -m meeting_recorder.control \
-        --config "${TAPRECORD_CONFIG:-$HOME/.config/taprecord/config.json}" \
+        --config "${MEETREC_CONFIG:-$HOME/.config/meetrec/config.json}" \
         worker --once \
         >>"$SESSION_DIR/transcribe.log" 2>&1 &
     WORKER_PID=$!
